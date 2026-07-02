@@ -20,6 +20,7 @@ windows/
   README.md            # Windows-specific implementation notes
   AutoAimReview.ps1    # implemented: WinForms GUI launcher
   AutoAimReview.cmd    # implemented: double-click launcher for release zip
+  installer/           # implemented: Inno Setup installer definition
 ```
 
 ## Windows API Boundary
@@ -70,10 +71,32 @@ The package contains:
   branding.
 - `examples/sample_frames.jsonl`: bundled sample input for first launch.
 
-## Install and Incremental Update Scripts
+## Setup Installer
 
-This folder includes a binary Windows installer/updater for the current runtime
-scaffold:
+The preferred install artifact is:
+
+```text
+AutoAimReviewSetup-x64.exe
+```
+
+It is built by GitHub Actions with Inno Setup from
+`windows/installer/AutoAimReview.iss`. The installer provides a normal Windows
+setup wizard, Start Menu shortcuts, optional desktop shortcut, and an uninstall
+entry in Windows Settings.
+
+The setup installer installs the same files as the portable zip package:
+
+- `AutoAimReview.cmd`: GUI launcher.
+- `windows/AutoAimReview.ps1`: WinForms GUI implementation.
+- `bin/autoaim.exe`: Rust CLI used by the GUI.
+- `assets/logo.svg` and generated `assets/logo.ico`: package and shortcut
+  branding.
+- `examples/sample_frames.jsonl`: bundled sample input for first launch.
+
+## Portable Zip and Scripted Install
+
+This folder also includes a script-based installer/updater for the current
+runtime scaffold:
 
 - `install.ps1` downloads the prebuilt `AutoAimReview-windows-x64.zip` release
   asset, verifies it against `AutoAimReview-windows-x64-manifest.json`, installs
@@ -151,6 +174,7 @@ files are deleted. A signed MSI/MSIX package can be added later after
 GitHub Actions workflow `.github/workflows/windows-release.yml` builds the
 Windows package on `windows-latest` and uploads:
 
+- `AutoAimReviewSetup-x64.exe`
 - `AutoAimReview-windows-x64.zip`
 - `AutoAimReview-windows-x64-manifest.json`
 - `AutoAimReview-windows-x64-deltas.json`

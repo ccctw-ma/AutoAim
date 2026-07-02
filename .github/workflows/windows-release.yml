@@ -29,6 +29,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
       - name: Resolve version
         id: version
         shell: pwsh
@@ -64,6 +68,19 @@ jobs:
           python scripts\build_windows_package.py `
             --version "${{ steps.version.outputs.value }}" `
             --output-dir dist\windows
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found at $iscc"
+          }
+          & $iscc `
+            /DAppVersion="${{ steps.version.outputs.value }}" `
+            /DSourceDir="$PWD\dist\windows\package-root" `
+            /DOutputDir="$PWD\dist\windows" `
+            windows\installer\AutoAimReview.iss
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

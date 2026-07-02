@@ -21,7 +21,8 @@ Implemented now:
 - Rust validation, evaluation summary, and inference event CLI.
 - Windows GUI launcher for selecting JSONL files, validating, evaluating, and
   writing inference event logs.
-- Windows package logo assets and installer-created shortcuts.
+- Windows Setup installer, package logo assets, and installer-created
+  shortcuts.
 - Frame annotation data model.
 - Python evaluation CLI.
 - Python dataset validation CLI.
@@ -89,12 +90,36 @@ The GUI can:
 - preview `inference.result` events,
 - write event JSONL output.
 
-## Windows Install and Incremental Update
+## Windows Install
 
-Windows users should install the prebuilt release package. The target machine
-does not need Rust, Cargo, or Git.
+Windows users should install the prebuilt setup executable. The target machine
+does not need Rust, Cargo, Git, or Python.
 
-Direct install from the latest GitHub release:
+Recommended install flow:
+
+1. Open the latest GitHub release.
+2. Download `AutoAimReviewSetup-x64.exe`.
+3. Double-click it and follow the installer.
+4. Launch `AutoAim Review` from the desktop or Start Menu.
+
+Latest release:
+
+```text
+https://github.com/ccctw-ma/AutoAim/releases/latest
+```
+
+The setup installer creates a normal Windows uninstall entry, desktop shortcut,
+and Start Menu shortcuts.
+
+Portable zip fallback:
+
+```powershell
+Expand-Archive .\AutoAimReview-windows-x64.zip -DestinationPath .\AutoAimReview
+cd .\AutoAimReview
+.\AutoAimReview.cmd
+```
+
+Scripted install fallback:
 
 ```powershell
 $installer = "$env:TEMP\autoaim-install.ps1"
@@ -102,7 +127,7 @@ iwr https://raw.githubusercontent.com/ccctw-ma/AutoAim/main/windows/install.ps1 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
-The installer downloads `AutoAimReview-windows-x64.zip`, verifies it with
+The scripted installer downloads `AutoAimReview-windows-x64.zip`, verifies it with
 `AutoAimReview-windows-x64-manifest.json`, installs it into
 `%LOCALAPPDATA%\AutoAimReview`, and adds the `bin` directory to the user `PATH`.
 It also creates a desktop shortcut, a Start Menu shortcut, and an
@@ -113,6 +138,8 @@ Launch after installation:
 ```powershell
 autoaim-review
 ```
+
+## Incremental Update
 
 Check for an incremental update:
 
