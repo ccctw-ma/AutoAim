@@ -36,3 +36,4 @@ models/
 *.onnx
 *.engine
 *.pt
+.env
