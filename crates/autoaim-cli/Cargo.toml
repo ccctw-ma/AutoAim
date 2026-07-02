@@ -16,4 +16,5 @@ autoaim-core = { path = "../autoaim-core" }
 autoaim-ipc = { path = "../autoaim-ipc" }
 autoaim-runtime = { path = "../autoaim-runtime" }
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true

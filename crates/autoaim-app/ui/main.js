@@ -17,8 +17,17 @@ const i18n = {
     saveAs: "Save as",
     validate: "Validate",
     evaluate: "Evaluate",
+    positions: "Person positions",
     preview: "Preview events",
     writeEvents: "Write events",
+    runtimeKicker: "Runtime",
+    runtimeTitle: "GPU inference and updates",
+    provider: "Provider",
+    threshold: "Confidence",
+    modelPath: "Model path",
+    showRuntime: "Show config",
+    checkUpdates: "Check updates",
+    applyUpdate: "Apply update",
     safetyTitle: "Safety boundary",
     safetyText: "This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.",
     metricsKicker: "Metrics",
@@ -46,8 +55,15 @@ const i18n = {
     evaluationDone: "Evaluation complete.",
     previewing: "Generating event preview...",
     previewDone: "Preview generated.",
+    positionsPreviewing: "Reading person positions...",
+    positionsDone: "Person positions generated.",
     writing: "Writing event JSONL...",
     writeDone: "Event JSONL written.",
+    runtimeReady: "Runtime config generated.",
+    checkingUpdates: "Checking updates...",
+    updateCheckDone: "Update check complete.",
+    applyingUpdate: "Starting updater...",
+    applyUpdateStarted: "Updater started. The app may close.",
     selectInputFirst: "Select a frame JSONL file first.",
     selectOutputFirst: "Select an output path first.",
     noTauri: "Tauri API is not available. Run this page through AutoAimReview.exe.",
@@ -68,8 +84,17 @@ const i18n = {
     saveAs: "另存为",
     validate: "校验",
     evaluate: "评估",
+    positions: "人物位置",
     preview: "预览事件",
     writeEvents: "写出事件",
+    runtimeKicker: "运行时",
+    runtimeTitle: "GPU 推理与更新",
+    provider: "推理后端",
+    threshold: "置信度",
+    modelPath: "模型路径",
+    showRuntime: "显示配置",
+    checkUpdates: "检查更新",
+    applyUpdate: "立即更新",
     safetyTitle: "安全边界",
     safetyText: "本应用不会移动鼠标、点击、注入输入、附加进程，也不会控制游戏。",
     metricsKicker: "指标",
@@ -97,8 +122,15 @@ const i18n = {
     evaluationDone: "评估完成。",
     previewing: "正在生成事件预览...",
     previewDone: "预览已生成。",
+    positionsPreviewing: "正在读取人物位置...",
+    positionsDone: "人物位置已生成。",
     writing: "正在写出事件 JSONL...",
     writeDone: "事件 JSONL 已写出。",
+    runtimeReady: "运行时配置已生成。",
+    checkingUpdates: "正在检查更新...",
+    updateCheckDone: "更新检查完成。",
+    applyingUpdate: "正在启动更新器...",
+    applyUpdateStarted: "更新器已启动，应用可能会关闭。",
     selectInputFirst: "请先选择帧 JSONL 文件。",
     selectOutputFirst: "请先选择输出路径。",
     noTauri: "Tauri API 不可用，请通过 AutoAimReview.exe 打开本页面。",
@@ -122,8 +154,15 @@ const els = {
   chooseOutput: $("chooseOutput"),
   validateBtn: $("validateBtn"),
   evaluateBtn: $("evaluateBtn"),
+  positionsBtn: $("positionsBtn"),
   previewBtn: $("previewBtn"),
   writeBtn: $("writeBtn"),
+  providerSelect: $("providerSelect"),
+  confidenceInput: $("confidenceInput"),
+  modelPath: $("modelPath"),
+  showRuntimeBtn: $("showRuntimeBtn"),
+  checkUpdatesBtn: $("checkUpdatesBtn"),
+  applyUpdateBtn: $("applyUpdateBtn"),
   clearLog: $("clearLog"),
   logOutput: $("logOutput"),
   framesMetric: $("framesMetric"),
@@ -182,7 +221,18 @@ function requireOutputPath() {
 }
 
 function setBusy(isBusy) {
-  [els.validateBtn, els.evaluateBtn, els.previewBtn, els.writeBtn, els.chooseInput, els.chooseOutput].forEach((button) => {
+  [
+    els.validateBtn,
+    els.evaluateBtn,
+    els.positionsBtn,
+    els.previewBtn,
+    els.writeBtn,
+    els.showRuntimeBtn,
+    els.checkUpdatesBtn,
+    els.applyUpdateBtn,
+    els.chooseInput,
+    els.chooseOutput,
+  ].forEach((button) => {
     button.disabled = isBusy;
   });
 }
@@ -262,6 +312,14 @@ els.evaluateBtn.addEventListener("click", async () => {
   });
 });
 
+els.positionsBtn.addEventListener("click", async () => {
+  await runAction(t("positionsPreviewing"), async () => {
+    const result = await invoke("preview_person_positions", { path: requireInputPath(), limit: 50 });
+    setStatus(t("positionsDone"), "success");
+    log(t("positionsDone"), result);
+  });
+});
+
 els.previewBtn.addEventListener("click", async () => {
   await runAction(t("previewing"), async () => {
     const result = await invoke("preview_events", { path: requireInputPath(), limit: 20 });
@@ -278,6 +336,36 @@ els.writeBtn.addEventListener("click", async () => {
     });
     setStatus(t("writeDone"), "success");
     log(t("writeDone"), result);
+  });
+});
+
+els.showRuntimeBtn.addEventListener("click", async () => {
+  await runAction(t("runtimeReady"), async () => {
+    const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+    const config = await invoke("inference_runtime_config", {
+      provider: els.providerSelect.value,
+      modelPath: els.modelPath.value.trim(),
+      deviceId: 0,
+      confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+    });
+    setStatus(t("runtimeReady"), "success");
+    log(t("runtimeReady"), config);
+  });
+});
+
+els.checkUpdatesBtn.addEventListener("click", async () => {
+  await runAction(t("checkingUpdates"), async () => {
+    const result = await invoke("check_updates", { installDir: null });
+    setStatus(t("updateCheckDone"), result.success ? "success" : "warning");
+    log(t("updateCheckDone"), result);
+  });
+});
+
+els.applyUpdateBtn.addEventListener("click", async () => {
+  await runAction(t("applyingUpdate"), async () => {
+    const result = await invoke("apply_update", { installDir: null });
+    setStatus(t("applyUpdateStarted"), result.success ? "success" : "warning");
+    log(t("applyUpdateStarted"), result);
   });
 });
 

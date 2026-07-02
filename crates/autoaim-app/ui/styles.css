@@ -184,7 +184,8 @@ select:focus {
 }
 
 .metrics-panel,
-.guide-panel {
+.guide-panel,
+.runtime-panel {
   padding: 22px;
 }
 
@@ -293,6 +294,25 @@ button.ghost {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-top: 18px;
+}
+
+.runtime-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.runtime-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  gap: 12px;
+}
+
+.compact-field {
+  margin-top: 0;
+}
+
+.update-actions {
+  margin-top: 0;
 }
 
 .metric-card {

@@ -37,3 +37,6 @@ models/
 *.engine
 *.pt
 .env
+
+# Tauri build-generated icon assets
+crates/autoaim-app/icons/

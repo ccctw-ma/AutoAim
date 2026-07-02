@@ -63,6 +63,7 @@
           <div class="actions">
             <button id="validateBtn" data-i18n="validate">Validate</button>
             <button id="evaluateBtn" data-i18n="evaluate">Evaluate</button>
+            <button id="positionsBtn" data-i18n="positions">Person positions</button>
             <button id="previewBtn" data-i18n="preview">Preview events</button>
             <button id="writeBtn" class="primary" data-i18n="writeEvents">Write events</button>
           </div>
@@ -72,6 +73,41 @@
             <span data-i18n="safetyText">
               This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.
             </span>
+          </div>
+        </section>
+
+        <section class="panel runtime-panel">
+          <p class="section-kicker" data-i18n="runtimeKicker">Runtime</p>
+          <h2 data-i18n="runtimeTitle">GPU inference and updates</h2>
+
+          <div class="runtime-grid">
+            <div class="field-group compact-field">
+              <label for="providerSelect" data-i18n="provider">Provider</label>
+              <select id="providerSelect">
+                <option value="cuda">NVIDIA CUDA</option>
+                <option value="tensorrt">NVIDIA TensorRT</option>
+                <option value="directml">DirectML</option>
+                <option value="cpu">CPU</option>
+              </select>
+            </div>
+
+            <div class="field-group compact-field">
+              <label for="confidenceInput" data-i18n="threshold">Confidence</label>
+              <input id="confidenceInput" value="0.25" inputmode="decimal" />
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="modelPath" data-i18n="modelPath">Model path</label>
+            <div class="path-row">
+              <input id="modelPath" spellcheck="false" placeholder="models/person_head.onnx" />
+              <button id="showRuntimeBtn" class="secondary" data-i18n="showRuntime">Show config</button>
+            </div>
+          </div>
+
+          <div class="actions update-actions">
+            <button id="checkUpdatesBtn" data-i18n="checkUpdates">Check updates</button>
+            <button id="applyUpdateBtn" class="primary" data-i18n="applyUpdate">Apply update</button>
           </div>
         </section>
 

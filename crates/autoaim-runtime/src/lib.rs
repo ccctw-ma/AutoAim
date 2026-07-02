@@ -1,5 +1,5 @@
 use autoaim_core::{choose_target, AutoAimError, FrameRecord, TargetScorer};
-use autoaim_ipc::{encode_json_line, InferenceResult};
+use autoaim_ipc::{encode_json_line, AssistSuggestionEvent, InferenceResult};
 use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
@@ -39,6 +39,13 @@ impl ReviewPipeline {
         self.process_frame_with_latency(frame, self.config.default_latency_ms)
     }
 
+    pub fn process_frame_with_assist(
+        &mut self,
+        frame: &FrameRecord,
+    ) -> (InferenceResult, Option<AssistSuggestionEvent>) {
+        self.process_frame_with_assist_and_latency(frame, self.config.default_latency_ms)
+    }
+
     pub fn process_frame_with_latency(
         &mut self,
         frame: &FrameRecord,
@@ -56,6 +63,36 @@ impl ReviewPipeline {
             frame.objects.clone(),
             suggestion,
         )
+    }
+
+    pub fn process_frame_with_assist_and_latency(
+        &mut self,
+        frame: &FrameRecord,
+        latency_ms: f32,
+    ) -> (InferenceResult, Option<AssistSuggestionEvent>) {
+        let suggestion = choose_target(frame, self.config.scorer, self.previous_track_id);
+        self.previous_track_id = suggestion
+            .target_index
+            .and_then(|index| frame.objects.get(index))
+            .and_then(|object| object.track_id);
+
+        let assist_event = if frame.input.mouse_down && suggestion.suggested_point.is_some() {
+            Some(AssistSuggestionEvent::left_mouse_review(
+                frame.frame_id,
+                suggestion,
+            ))
+        } else {
+            None
+        };
+
+        let result = InferenceResult::new(
+            frame.frame_id,
+            latency_ms,
+            frame.objects.clone(),
+            suggestion,
+        );
+
+        (result, assist_event)
     }
 
     pub fn process_records(&mut self, records: &[FrameRecord]) -> Vec<InferenceResult> {
@@ -189,5 +226,69 @@ mod tests {
         assert_eq!(result.frame_id, 7);
         assert_eq!(result.latency_ms, 4.2);
         assert_eq!(result.suggestion.suggested_point, Some([505.0, 295.0]));
+    }
+
+    #[test]
+    fn pipeline_emits_review_only_assist_event_when_left_mouse_is_down() {
+        let frame = FrameRecord {
+            frame_id: 8,
+            timestamp_qpc: 101,
+            image: "frame.jpg".to_string(),
+            objects: vec![DetectionObject {
+                class_name: "person".to_string(),
+                bbox: [470.0, 260.0, 80.0, 220.0],
+                head_bbox: None,
+                head_point: Some([505.0, 295.0]),
+                confidence: 0.75,
+                track_id: Some(9),
+            }],
+            input: FrameInput {
+                cursor: [500.0, 300.0],
+                mouse_down: true,
+            },
+            resolution: None,
+            window_handle: None,
+            session_id: Some("session-001".to_string()),
+            scene_id: None,
+        };
+
+        let mut pipeline = ReviewPipeline::default();
+        let (_result, assist) = pipeline.process_frame_with_assist_and_latency(&frame, 3.0);
+        let assist = assist.expect("mouse down should create a review-only assist event");
+
+        assert_eq!(assist.frame_id, 8);
+        assert_eq!(assist.trigger, "mouse_left_down");
+        assert!(assist.review_only);
+        assert_eq!(assist.suggestion.suggested_point, Some([505.0, 295.0]));
+    }
+
+    #[test]
+    fn pipeline_does_not_emit_assist_event_when_mouse_is_up() {
+        let frame = FrameRecord {
+            frame_id: 9,
+            timestamp_qpc: 102,
+            image: "frame.jpg".to_string(),
+            objects: vec![DetectionObject {
+                class_name: "person".to_string(),
+                bbox: [470.0, 260.0, 80.0, 220.0],
+                head_bbox: None,
+                head_point: Some([505.0, 295.0]),
+                confidence: 0.75,
+                track_id: Some(9),
+            }],
+            input: FrameInput {
+                cursor: [500.0, 300.0],
+                mouse_down: false,
+            },
+            resolution: None,
+            window_handle: None,
+            session_id: Some("session-001".to_string()),
+            scene_id: None,
+        };
+
+        let mut pipeline = ReviewPipeline::default();
+        let (_result, assist) = pipeline.process_frame_with_assist(&frame);
+
+        assert!(assist.is_none());
     }
 }

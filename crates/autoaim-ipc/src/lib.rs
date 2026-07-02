@@ -10,6 +10,69 @@ pub enum MessageType {
     CaptureFrame,
     #[serde(rename = "inference.result")]
     InferenceResult,
+    #[serde(rename = "assist.suggestion")]
+    AssistSuggestion,
+    #[serde(rename = "runtime.config")]
+    RuntimeConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum InferenceProvider {
+    #[serde(rename = "cpu")]
+    Cpu,
+    #[serde(rename = "cuda")]
+    Cuda,
+    #[serde(rename = "tensorrt")]
+    TensorRt,
+    #[serde(rename = "directml")]
+    DirectMl,
+}
+
+impl Default for InferenceProvider {
+    fn default() -> Self {
+        Self::Cpu
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct InferenceRuntimeConfig {
+    #[serde(rename = "type")]
+    pub message_type: MessageType,
+    pub provider: InferenceProvider,
+    pub model_path: Option<String>,
+    pub device_id: Option<u32>,
+    pub confidence_threshold: f32,
+    pub review_only: bool,
+}
+
+impl Default for InferenceRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            message_type: MessageType::RuntimeConfig,
+            provider: InferenceProvider::Cpu,
+            model_path: None,
+            device_id: None,
+            confidence_threshold: 0.25,
+            review_only: true,
+        }
+    }
+}
+
+impl InferenceRuntimeConfig {
+    pub fn new(
+        provider: InferenceProvider,
+        model_path: Option<String>,
+        device_id: Option<u32>,
+        confidence_threshold: f32,
+    ) -> Self {
+        Self {
+            provider,
+            model_path,
+            device_id,
+            confidence_threshold,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -91,6 +154,32 @@ impl InferenceResult {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AssistSuggestionEvent {
+    #[serde(rename = "type")]
+    pub message_type: MessageType,
+    pub frame_id: u64,
+    pub trigger: String,
+    pub target_index: Option<usize>,
+    pub confidence: f32,
+    pub suggestion: RuntimeSuggestion,
+    pub review_only: bool,
+}
+
+impl AssistSuggestionEvent {
+    pub fn left_mouse_review(frame_id: u64, suggestion: AimSuggestion) -> Self {
+        Self {
+            message_type: MessageType::AssistSuggestion,
+            frame_id,
+            trigger: "mouse_left_down".to_string(),
+            target_index: suggestion.target_index,
+            confidence: suggestion.confidence,
+            suggestion: suggestion.into(),
+            review_only: true,
+        }
+    }
+}
+
 pub fn encode_json_line<T: Serialize>(message: &T) -> Result<String, serde_json::Error> {
     let mut line = serde_json::to_string(message)?;
     line.push('\n');
@@ -135,5 +224,42 @@ mod tests {
 
         assert_eq!(json["type"], "inference.result");
         assert_eq!(json["suggestion"]["suggested_point"][0], 479.0);
+    }
+
+    #[test]
+    fn assist_suggestion_serializes_review_only_contract() {
+        let suggestion = AimSuggestion {
+            frame_id: 10231,
+            suggested_point: Some([479.0, 211.0]),
+            confidence: 0.91,
+            target_index: Some(0),
+            dx: Some(-33.0),
+            dy: Some(-173.0),
+            score: 0.82,
+        };
+        let message = AssistSuggestionEvent::left_mouse_review(10231, suggestion);
+
+        let json = serde_json::to_value(message).unwrap();
+
+        assert_eq!(json["type"], "assist.suggestion");
+        assert_eq!(json["trigger"], "mouse_left_down");
+        assert_eq!(json["review_only"], true);
+        assert_eq!(json["suggestion"]["dx"], -33.0);
+    }
+
+    #[test]
+    fn runtime_config_serializes_gpu_provider() {
+        let config = InferenceRuntimeConfig::new(
+            InferenceProvider::Cuda,
+            Some("models/person_head.onnx".to_string()),
+            Some(0),
+            0.35,
+        );
+
+        let json = serde_json::to_value(config).unwrap();
+
+        assert_eq!(json["type"], "runtime.config");
+        assert_eq!(json["provider"], "cuda");
+        assert_eq!(json["review_only"], true);
     }
 }

@@ -3,7 +3,22 @@ use autoaim_core::{read_jsonl_path, suggest_frames, summarize, validate_records,
 use autoaim_ipc::encode_json_line;
 use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use std::{path::PathBuf, process::ExitCode};
+
+#[derive(Debug, Serialize)]
+struct PersonPosition {
+    frame_id: u64,
+    object_index: usize,
+    bbox: [f32; 4],
+    head_point: [f32; 2],
+    confidence: f32,
+    track_id: Option<u64>,
+    cursor: [f32; 2],
+    dx: f32,
+    dy: f32,
+    left_mouse_down: bool,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "autoaim")]
@@ -43,6 +58,14 @@ enum Command {
         /// Output inference event JSONL file.
         output: PathBuf,
     },
+    /// Print person body/head screen positions from frame records.
+    Positions {
+        /// Input JSONL file.
+        input: PathBuf,
+        /// Also emit review-only assist.suggestion events for mouse_down frames.
+        #[arg(long)]
+        assist_events: bool,
+    },
     /// Check for or apply updates from the Windows binary installation.
     Update {
         /// Show detected upstream changes without updating files.
@@ -75,6 +98,10 @@ fn run() -> Result<()> {
         Command::Evaluate { input, json } => evaluate(input, json),
         Command::Suggest { input } => suggest(input),
         Command::RunJsonl { input, output } => run_jsonl(input, output),
+        Command::Positions {
+            input,
+            assist_events,
+        } => positions(input, assist_events),
         Command::Update {
             check,
             show_diff,
@@ -151,6 +178,44 @@ fn run_jsonl(input: PathBuf, output: PathBuf) -> Result<()> {
 
     writer.flush()?;
     println!("processed {} frame records", records.len());
+    Ok(())
+}
+
+fn positions(input: PathBuf, assist_events: bool) -> Result<()> {
+    let records = read_jsonl_path(input)?;
+    let mut pipeline = ReviewPipeline::default();
+
+    for record in &records {
+        let (_result, assist) = pipeline.process_frame_with_assist(record);
+        for (object_index, object) in record.objects.iter().enumerate() {
+            if object.class_name != "person" {
+                continue;
+            }
+
+            let head_point = object.aim_point();
+            let cursor = record.input.cursor;
+            let position = PersonPosition {
+                frame_id: record.frame_id,
+                object_index,
+                bbox: object.bbox,
+                head_point,
+                confidence: object.confidence,
+                track_id: object.track_id,
+                cursor,
+                dx: head_point[0] - cursor[0],
+                dy: head_point[1] - cursor[1],
+                left_mouse_down: record.input.mouse_down,
+            };
+            println!("{}", serde_json::to_string(&position)?);
+        }
+
+        if assist_events {
+            if let Some(event) = assist {
+                println!("{}", serde_json::to_string(&event)?);
+            }
+        }
+    }
+
     Ok(())
 }
 

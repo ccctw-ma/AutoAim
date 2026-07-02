@@ -44,15 +44,41 @@ jobs:
           "value=$version" >> $env:GITHUB_OUTPUT
 
       - name: Download previous package assets
-        if: ${{ github.event.inputs.previous_package_url != '' && github.event.inputs.previous_manifest_url != '' }}
+        id: previous
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Path dist\previous -Force | Out-Null
-          Invoke-WebRequest -Uri "${{ github.event.inputs.previous_package_url }}" -OutFile dist\previous\AutoAimReview-windows-x64.zip
-          Invoke-WebRequest -Uri "${{ github.event.inputs.previous_manifest_url }}" -OutFile dist\previous\AutoAimReview-windows-x64-manifest.json
+
+          $packageUrl = "${{ github.event.inputs.previous_package_url }}"
+          $manifestUrl = "${{ github.event.inputs.previous_manifest_url }}"
+          if (-not [string]::IsNullOrWhiteSpace($packageUrl) -and -not [string]::IsNullOrWhiteSpace($manifestUrl)) {
+            Invoke-WebRequest -Uri $packageUrl -OutFile dist\previous\AutoAimReview-windows-x64.zip
+            Invoke-WebRequest -Uri $manifestUrl -OutFile dist\previous\AutoAimReview-windows-x64-manifest.json
+            "available=true" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          $latest = gh release view --json tagName --jq .tagName 2>$null
+          if ([string]::IsNullOrWhiteSpace($latest)) {
+            "available=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          gh release download $latest `
+            --pattern AutoAimReview-windows-x64.zip `
+            --pattern AutoAimReview-windows-x64-manifest.json `
+            --dir dist\previous
+
+          if ((Test-Path dist\previous\AutoAimReview-windows-x64.zip) -and (Test-Path dist\previous\AutoAimReview-windows-x64-manifest.json)) {
+            "available=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "available=false" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Build package with delta
-        if: ${{ github.event.inputs.previous_package_url != '' && github.event.inputs.previous_manifest_url != '' }}
+        if: ${{ steps.previous.outputs.available == 'true' }}
         shell: pwsh
         run: |
           python scripts\build_windows_package.py `
@@ -62,7 +88,7 @@ jobs:
             --previous-manifest dist\previous\AutoAimReview-windows-x64-manifest.json
 
       - name: Verify package delta
-        if: ${{ github.event.inputs.previous_package_url != '' && github.event.inputs.previous_manifest_url != '' }}
+        if: ${{ steps.previous.outputs.available == 'true' }}
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.value }}"
@@ -74,7 +100,7 @@ jobs:
             --new-manifest dist\windows\AutoAimReview-windows-x64-manifest.json
 
       - name: Build package
-        if: ${{ github.event.inputs.previous_package_url == '' || github.event.inputs.previous_manifest_url == '' }}
+        if: ${{ steps.previous.outputs.available != 'true' }}
         shell: pwsh
         run: |
           python scripts\build_windows_package.py `

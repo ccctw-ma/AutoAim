@@ -21,6 +21,23 @@ are stable.
 
 ## Message Types
 
+### RuntimeConfig
+
+```json
+{
+  "type": "runtime.config",
+  "provider": "cuda",
+  "model_path": "models/person_head.onnx",
+  "device_id": 0,
+  "confidence_threshold": 0.25,
+  "review_only": true
+}
+```
+
+Supported providers are `cuda`, `tensorrt`, `directml`, and `cpu`. CUDA and
+TensorRT are intended for NVIDIA GPUs. The config is review-only and does not
+enable OS input control.
+
 ### CaptureFrameMeta
 
 ```json
@@ -62,6 +79,31 @@ Frame pixels stay in the Rust-owned D3D11 ring buffer. Metadata crosses IPC.
   }
 }
 ```
+
+### AssistSuggestion
+
+When the captured input metadata says the left mouse button is down and the
+frame has a person target, the runtime may emit a review-only assist suggestion:
+
+```json
+{
+  "type": "assist.suggestion",
+  "frame_id": 10231,
+  "trigger": "mouse_left_down",
+  "target_index": 0,
+  "confidence": 0.91,
+  "suggestion": {
+    "suggested_point": [479, 211],
+    "dx": -33,
+    "dy": -173,
+    "score": 0.82
+  },
+  "review_only": true
+}
+```
+
+This event reports where the model thinks the person's head is on screen. It is
+not a command to move the system cursor.
 
 ### DatasetRecord
 

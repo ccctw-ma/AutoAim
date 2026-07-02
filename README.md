@@ -18,10 +18,11 @@ Implemented now:
 - Rust frame/detection models compatible with the JSONL schema.
 - Rust JSONL dataset reader/writer.
 - Rust target scoring that outputs `suggested_point` and `dx/dy`.
-- Rust validation, evaluation summary, and inference event CLI.
+- Rust validation, evaluation summary, person/head position, and inference
+  event CLI.
 - Rust + Tauri GUI for selecting JSONL files, validating, evaluating, previewing
-  events, writing inference event logs, and switching between English and
-  Chinese.
+  person/head positions, previewing events, writing inference event logs,
+  checking updates, and switching between English and Chinese.
 - Windows Setup installer, package logo assets, and installer-created
   shortcuts.
 - Frame annotation data model.
@@ -65,6 +66,8 @@ cargo test --workspace
 cargo run -p autoaim-cli -- validate examples/sample_frames.jsonl
 cargo run -p autoaim-cli -- evaluate examples/sample_frames.jsonl --json
 cargo run -p autoaim-cli -- suggest examples/sample_frames.jsonl
+cargo run -p autoaim-cli -- positions examples/sample_frames.jsonl
+cargo run -p autoaim-cli -- positions examples/sample_frames.jsonl --assist-events
 cargo run -p autoaim-cli -- run-jsonl examples/sample_frames.jsonl .e2e-output/events.jsonl
 ```
 
@@ -88,8 +91,11 @@ The GUI can:
 - select a frame JSONL file,
 - validate dataset records,
 - evaluate suggestions and show metrics,
+- preview person body boxes, inferred head points, and screen-space `dx/dy`,
 - preview `inference.result` events,
 - write event JSONL output,
+- show the review-only CUDA/TensorRT/DirectML/CPU inference config,
+- check and apply incremental app updates,
 - switch between English and Chinese.
 
 Basic use:
@@ -98,10 +104,33 @@ Basic use:
 2. Select a frame JSONL file. The bundled sample is available after install.
 3. Click `Validate` to check schema/grouping issues.
 4. Click `Evaluate` to calculate review metrics.
-5. Click `Write events` to export review-only inference event JSONL.
+5. Click `Person positions` to inspect body boxes, head points, and offsets.
+6. Click `Write events` to export review-only inference event JSONL.
 
 Live window capture, ONNX inference, and overlay rendering are still planned
 runtime modules and are not enabled in this version.
+
+## Person Position Output
+
+`autoaim positions` prints one JSON line per detected person. Each line includes
+the body bbox, inferred head point, confidence, track id, cursor point, and
+screen-space `dx/dy` from cursor to head point:
+
+```bash
+cargo run -p autoaim-cli -- positions examples/sample_frames.jsonl
+```
+
+When frame metadata has `input.mouse_down=true`, `--assist-events` additionally
+emits a review-only `assist.suggestion` event. It reports the suggested head
+point but does not move the system cursor or inject input:
+
+```bash
+cargo run -p autoaim-cli -- positions examples/sample_frames.jsonl --assist-events
+```
+
+The app also exposes a runtime config preview for NVIDIA CUDA or TensorRT model
+execution. Actual live ONNX/TensorRT inference still requires the planned
+capture/inference crates and a supplied person/head model file.
 
 ## Windows Install
 
@@ -176,6 +205,9 @@ reinstall is required.
 
 The Rust CLI exposes the same updater as `autoaim update --check` and
 `autoaim update`.
+
+The GUI has `Check updates` and `Apply update` buttons. `Apply update` starts
+the external updater and closes the app so Windows can replace locked files.
 
 Release builds verify generated delta packages with
 `scripts/verify_delta_update.py` when a previous package and manifest are
