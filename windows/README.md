@@ -18,6 +18,8 @@ crates/
 
 windows/
   README.md            # Windows-specific implementation notes
+  AutoAimReview.ps1    # implemented: WinForms GUI launcher
+  AutoAimReview.cmd    # implemented: double-click launcher for release zip
 ```
 
 ## Windows API Boundary
@@ -45,6 +47,28 @@ to game processes, or move the system cursor.
 2. Rust JSONL frame model compatible with the current schema.
 3. Rust target scoring and inference event generation.
 4. Rust CLI commands for validation, evaluation, and suggestion event output.
+5. WinForms GUI launcher for the current offline runtime.
+
+The current GUI intentionally wraps the offline JSONL workflow only. Live
+capture, ONNX inference, and overlay rendering are disabled in the UI until
+their Rust runtime crates exist.
+
+## Release Zip GUI Entry
+
+After extracting `AutoAimReview-windows-x64.zip`, run:
+
+```powershell
+.\AutoAimReview.cmd
+```
+
+The package contains:
+
+- `AutoAimReview.cmd`: double-click GUI launcher.
+- `windows/AutoAimReview.ps1`: WinForms GUI implementation.
+- `bin/autoaim.exe`: Rust CLI used by the GUI.
+- `assets/logo.svg` and generated `assets/logo.ico`: package and shortcut
+  branding.
+- `examples/sample_frames.jsonl`: bundled sample input for first launch.
 
 ## Install and Incremental Update Scripts
 
@@ -53,14 +77,16 @@ scaffold:
 
 - `install.ps1` downloads the prebuilt `AutoAimReview-windows-x64.zip` release
   asset, verifies it against `AutoAimReview-windows-x64-manifest.json`, installs
-  it into `%LOCALAPPDATA%\AutoAimReview`, and adds the `bin` directory to the
-  user `PATH`.
+  it into `%LOCALAPPDATA%\AutoAimReview`, adds the `bin` directory to the user
+  `PATH`, and creates desktop plus Start Menu shortcuts.
 - `update.ps1` reads the installed version, downloads
   `AutoAimReview-windows-x64-deltas.json`, finds the matching old-version to
   new-version delta, verifies SHA256 hashes, and applies 64 KiB block-level
   binary patches for changed files.
 - `autoaim-update.cmd` is generated during installation as the normal user
   entry point for update checks.
+- `autoaim-review.cmd` is generated during installation as the normal user entry
+  point for the GUI.
 
 The target Windows machine does not need Rust, Cargo, or Git.
 
@@ -90,6 +116,12 @@ Apply the incremental update:
 autoaim-update
 ```
 
+Launch the GUI after installation:
+
+```powershell
+autoaim-review
+```
+
 The Rust CLI wrapper supports the same flow:
 
 ```powershell
@@ -103,6 +135,8 @@ Useful flags:
   `%LOCALAPPDATA%\AutoAimReview`.
 - `-Repo <owner/name>` installs or updates from another GitHub repository.
 - `-NoPathUpdate` leaves the user `PATH` unchanged during install.
+- `-NoDesktopShortcut` skips the desktop shortcut.
+- `-NoStartMenuShortcut` skips the Start Menu shortcut.
 - `-TargetVersion <tag>` updates to a specific release tag instead of latest.
 
 The updater intentionally does not download and overwrite the latest zip by

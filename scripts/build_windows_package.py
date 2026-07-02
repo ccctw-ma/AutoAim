@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,66 @@ def run(command: list[str], cwd: Path) -> None:
 def copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
+
+
+def write_logo_ico(path: Path, size: int = 64) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pixels: list[tuple[int, int, int, int]] = []
+    center = (size - 1) / 2.0
+
+    for y in range(size):
+        for x in range(size):
+            dx = x - center
+            dy = y - center
+            radius = (dx * dx + dy * dy) ** 0.5
+            r, g, b, a = 11, 16, 32, 255
+
+            if 20 <= radius <= 24:
+                r, g, b = 34, 211, 238
+            elif 30 <= radius <= 32:
+                r, g, b = 31, 41, 55
+
+            if abs(dx) <= 2 and (radius < 12 or radius > 25):
+                r, g, b = 34, 211, 238
+            if abs(dy) <= 2 and (radius < 12 or radius > 25):
+                r, g, b = 34, 211, 238
+
+            left_stem = abs(x - (22 + y * 0.22)) <= 2 and 18 <= y <= 47
+            right_stem = abs(x - (42 - y * 0.22)) <= 2 and 18 <= y <= 47
+            crossbar = 35 <= y <= 39 and 26 <= x <= 38
+            if left_stem or right_stem or crossbar:
+                r, g, b = 248, 250, 252
+
+            if radius <= 3:
+                r, g, b = 249, 115, 22
+
+            pixels.append((b, g, r, a))
+
+    xor_bitmap = bytearray()
+    for y in reversed(range(size)):
+        row_start = y * size
+        for pixel in pixels[row_start : row_start + size]:
+            xor_bitmap.extend(pixel)
+
+    and_mask = bytes((size // 8) * size)
+    bitmap_info_header = struct.pack(
+        "<IIIHHIIIIII",
+        40,
+        size,
+        size * 2,
+        1,
+        32,
+        0,
+        len(xor_bitmap),
+        0,
+        0,
+        0,
+        0,
+    )
+    image = bitmap_info_header + bytes(xor_bitmap) + and_mask
+    header = struct.pack("<HHH", 0, 1, 1)
+    directory = struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(image), 22)
+    path.write_bytes(header + directory + image)
 
 
 def collect_files(root: Path) -> list[FileRecord]:
@@ -205,12 +266,16 @@ def build_package(args: argparse.Namespace) -> None:
     package_root = output_dir / "package-root"
     bin_dir = package_root / "bin"
     windows_dir = package_root / "windows"
+    assets_dir = package_root / "assets"
+    examples_dir = package_root / "examples"
 
     if package_root.exists():
         shutil.rmtree(package_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True)
     windows_dir.mkdir(parents=True)
+    assets_dir.mkdir(parents=True)
+    examples_dir.mkdir(parents=True)
 
     if args.exe_path:
         exe_source = Path(args.exe_path).resolve()
@@ -224,7 +289,13 @@ def build_package(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"missing built executable: {exe_source}")
 
     copy_file(exe_source, bin_dir / "autoaim.exe")
+    copy_file(repo / "windows" / "AutoAimReview.cmd", package_root / "AutoAimReview.cmd")
+    copy_file(repo / "windows" / "AutoAimReview.ps1", windows_dir / "AutoAimReview.ps1")
+    copy_file(repo / "windows" / "install.ps1", windows_dir / "install.ps1")
     copy_file(repo / "windows" / "update.ps1", windows_dir / "update.ps1")
+    copy_file(repo / "assets" / "logo.svg", assets_dir / "logo.svg")
+    write_logo_ico(assets_dir / "logo.ico")
+    copy_file(repo / "examples" / "sample_frames.jsonl", examples_dir / "sample_frames.jsonl")
     copy_file(repo / "README.md", package_root / "README.md")
     copy_file(repo / "LICENSE", package_root / "LICENSE")
 

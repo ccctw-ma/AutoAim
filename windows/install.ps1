@@ -8,7 +8,9 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "AutoAimReview"),
     [string]$PackageAsset = "AutoAimReview-windows-x64.zip",
     [string]$ManifestAsset = "AutoAimReview-windows-x64-manifest.json",
-    [switch]$NoPathUpdate
+    [switch]$NoPathUpdate,
+    [switch]$NoDesktopShortcut,
+    [switch]$NoStartMenuShortcut
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,6 +104,74 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$updateScript" -Install
     Set-Content -Path (Join-Path $BinDir "autoaim-update.cmd") -Value $updateCmd -Encoding ASCII
 }
 
+function New-AppLauncherShim {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$BinDir
+    )
+
+    $guiScript = Join-Path $InstallRoot "windows\AutoAimReview.ps1"
+    $launcherCmd = @"
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$guiScript" %*
+"@
+    Set-Content -Path (Join-Path $BinDir "autoaim-review.cmd") -Value $launcherCmd -Encoding ASCII
+}
+
+function New-Shortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$ShortcutPath,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [string]$IconPath
+    )
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $ShortcutPath) -Force | Out-Null
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($ShortcutPath)
+    $shortcut.TargetPath = $TargetPath
+    $shortcut.WorkingDirectory = $WorkingDirectory
+    $shortcut.Description = $Description
+    if ($IconPath -and (Test-Path $IconPath -PathType Leaf)) {
+        $shortcut.IconLocation = $IconPath
+    }
+    $shortcut.Save()
+}
+
+function New-ApplicationShortcuts {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$BinDir,
+        [bool]$CreateDesktopShortcut,
+        [bool]$CreateStartMenuShortcut
+    )
+
+    $launcher = Join-Path $BinDir "autoaim-review.cmd"
+    $iconPath = Join-Path $InstallRoot "assets\logo.ico"
+    if (-not (Test-Path $iconPath -PathType Leaf)) {
+        $iconPath = Join-Path $BinDir "autoaim.exe"
+    }
+    if ($CreateDesktopShortcut) {
+        New-Shortcut `
+            -ShortcutPath (Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoAim Review.lnk") `
+            -TargetPath $launcher `
+            -WorkingDirectory $InstallRoot `
+            -Description "Open AutoAim Review" `
+            -IconPath $iconPath
+    }
+
+    if ($CreateStartMenuShortcut) {
+        $programs = [Environment]::GetFolderPath("Programs")
+        New-Shortcut `
+            -ShortcutPath (Join-Path $programs "AutoAim Review\AutoAim Review.lnk") `
+            -TargetPath $launcher `
+            -WorkingDirectory $InstallRoot `
+            -Description "Open AutoAim Review" `
+            -IconPath $iconPath
+    }
+}
+
 function Assert-PackageFiles {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -171,6 +241,12 @@ try {
     Copy-PackageToInstallDir -PackageRoot $extractDir -TargetRoot $InstallDir
     Copy-Item -Path $manifestPath -Destination (Join-Path $InstallDir "install-manifest.json") -Force
     New-CommandShim -InstallRoot $InstallDir -BinDir $BinDir
+    New-AppLauncherShim -InstallRoot $InstallDir -BinDir $BinDir
+    New-ApplicationShortcuts `
+        -InstallRoot $InstallDir `
+        -BinDir $BinDir `
+        -CreateDesktopShortcut (-not $NoDesktopShortcut) `
+        -CreateStartMenuShortcut (-not $NoStartMenuShortcut)
 
     if (-not $NoPathUpdate) {
         Add-UserPathEntry -Path $BinDir
@@ -178,8 +254,10 @@ try {
 
     Write-Step "Installation complete"
     Write-Host "Version: $($manifest.version)"
+    Write-Host "GUI:    $(Join-Path $BinDir 'autoaim-review.cmd')"
     Write-Host "Binary: $(Join-Path $BinDir 'autoaim.exe')"
     Write-Host "Updater: $(Join-Path $BinDir 'autoaim-update.cmd')"
+    Write-Host "Start menu shortcut: AutoAim Review"
     Write-Host "Run 'autoaim-update -CheckOnly' to check for incremental updates."
 }
 finally {

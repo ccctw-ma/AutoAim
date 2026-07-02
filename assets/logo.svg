@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="AutoAim Review logo">
+  <rect width="512" height="512" rx="112" fill="#0b1020"/>
+  <circle cx="256" cy="256" r="168" fill="none" stroke="#1f2937" stroke-width="28"/>
+  <circle cx="256" cy="256" r="104" fill="none" stroke="#22d3ee" stroke-width="18"/>
+  <path d="M256 58v82M256 372v82M58 256h82M372 256h82" stroke="#22d3ee" stroke-width="22" stroke-linecap="round"/>
+  <path d="M168 354 245 134c4-13 18-13 22 0l77 220h-50l-15-48h-68l-15 48h-28Zm57-92h40l-20-66-20 66Z" fill="#f8fafc"/>
+  <circle cx="256" cy="256" r="13" fill="#f97316"/>
+</svg>

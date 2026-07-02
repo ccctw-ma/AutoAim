@@ -19,6 +19,9 @@ Implemented now:
 - Rust JSONL dataset reader/writer.
 - Rust target scoring that outputs `suggested_point` and `dx/dy`.
 - Rust validation, evaluation summary, and inference event CLI.
+- Windows GUI launcher for selecting JSONL files, validating, evaluating, and
+  writing inference event logs.
+- Windows package logo assets and installer-created shortcuts.
 - Frame annotation data model.
 - Python evaluation CLI.
 - Python dataset validation CLI.
@@ -63,6 +66,29 @@ cargo run -p autoaim-cli -- suggest examples/sample_frames.jsonl
 cargo run -p autoaim-cli -- run-jsonl examples/sample_frames.jsonl .e2e-output/events.jsonl
 ```
 
+## Windows GUI
+
+The current Windows GUI is a packaged WinForms launcher over the Rust CLI. It is
+intended to make the existing offline review runtime usable by double-clicking.
+It does not yet implement live window capture, ONNX inference, or overlay
+rendering.
+
+Run it from an extracted release zip:
+
+```powershell
+Expand-Archive .\AutoAimReview-windows-x64.zip -DestinationPath .\AutoAimReview
+cd .\AutoAimReview
+.\AutoAimReview.cmd
+```
+
+The GUI can:
+
+- select a frame JSONL file,
+- validate dataset records,
+- evaluate suggestions and show metrics,
+- preview `inference.result` events,
+- write event JSONL output.
+
 ## Windows Install and Incremental Update
 
 Windows users should install the prebuilt release package. The target machine
@@ -79,7 +105,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
 The installer downloads `AutoAimReview-windows-x64.zip`, verifies it with
 `AutoAimReview-windows-x64-manifest.json`, installs it into
 `%LOCALAPPDATA%\AutoAimReview`, and adds the `bin` directory to the user `PATH`.
-Open a new terminal after installation.
+It also creates a desktop shortcut, a Start Menu shortcut, and an
+`autoaim-review` launcher command. Open a new terminal after installation.
+
+Launch after installation:
+
+```powershell
+autoaim-review
+```
 
 Check for an incremental update:
 
