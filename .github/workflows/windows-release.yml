@@ -77,6 +77,17 @@ jobs:
             "available=false" >> $env:GITHUB_OUTPUT
           }
 
+      - name: Run Rust tests
+        shell: pwsh
+        run: |
+          cargo test -p autoaim-core -p autoaim-ipc -p autoaim-runtime -p autoaim-cli
+
+      - name: Run Rust CLI E2E
+        shell: pwsh
+        run: |
+          cargo build -p autoaim-cli
+          python tests\rust_cli_e2e.py
+
       - name: Build package with delta
         if: ${{ steps.previous.outputs.available == 'true' }}
         shell: pwsh

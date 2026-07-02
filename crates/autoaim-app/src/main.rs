@@ -211,7 +211,10 @@ fn live_monitor_snapshot(
 
 #[tauri::command]
 fn detect_live_frame(request: LiveDetectionRequest) -> Result<LiveDetectionResult, String> {
-    let provider = request.provider.unwrap_or_else(|| "cuda".to_string());
+    let provider = request
+        .provider
+        .clone()
+        .unwrap_or_else(|| "cuda".to_string());
     let threshold = request.confidence_threshold.unwrap_or(0.25).clamp(0.0, 1.0);
     let model_path = request
         .model_path
