@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoaim.local/schemas/frame_record.schema.json",
+  "title": "AutoAim Frame Record",
+  "type": "object",
+  "required": ["frame_id", "timestamp_qpc", "image", "objects", "input"],
+  "additionalProperties": false,
+  "properties": {
+    "frame_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "timestamp_qpc": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "image": {
+      "type": "string"
+    },
+    "resolution": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "window_handle": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "scene_id": {
+      "type": "string"
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/object"
+      }
+    },
+    "input": {
+      "$ref": "#/$defs/input"
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number"
+      }
+    },
+    "bbox": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "number"
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["cursor", "mouse_down"],
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/point"
+        },
+        "mouse_down": {
+          "type": "boolean"
+        }
+      }
+    },
+    "object": {
+      "type": "object",
+      "required": ["class", "bbox", "confidence"],
+      "additionalProperties": true,
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "bbox": {
+          "$ref": "#/$defs/bbox"
+        },
+        "head_bbox": {
+          "$ref": "#/$defs/bbox"
+        },
+        "head_point": {
+          "$ref": "#/$defs/point"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "track_id": {
+          "type": "integer"
+        },
+        "attributes": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

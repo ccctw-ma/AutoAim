@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autoaim-review"
+version = "0.1.0"
+description = "Visualization-only screen capture, inference review, and dataset tooling for AutoAim."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "AutoAim contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "jsonschema>=4.0"]
+
+[project.scripts]
+autoaim-review = "autoaim_review.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autoaim_review"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
