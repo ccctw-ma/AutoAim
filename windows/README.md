@@ -1,34 +1,56 @@
-# Windows Client Scaffold
+# Windows Runtime Scaffold
 
-This folder documents the planned Windows implementation boundary. The current
-repository is initialized from an empty upstream snapshot, so the verified MVP
-code lives in the Python package first.
+This folder documents the Windows-specific boundary. The runtime direction is
+Rust-first. Python remains available for offline dataset tooling, but capture,
+inference, overlay, IPC, and runtime logging should be implemented in Rust.
 
-## Planned Solution Layout
+## Planned Rust Workspace
 
 ```text
+crates/
+  autoaim-core/        # implemented: structs, geometry, JSONL, scoring
+  autoaim-ipc/         # implemented: JSON IPC event schemas
+  autoaim-runtime/     # implemented: frame -> inference event pipeline
+  autoaim-cli/         # implemented: validate / evaluate / suggest commands
+  autoaim-capture/     # planned: Windows.Graphics.Capture through windows-rs
+  autoaim-infer/       # planned: ONNX Runtime wrapper, TensorRT feature gate
+  autoaim-app/         # planned: desktop shell, preview, overlay controls
+
 windows/
-  AutoAim.Review.sln
-  src/
-    AutoAim.Review.App/          # WinUI 3 shell and overlay
-    AutoAim.Worker/              # C++/WinRT capture + ONNX/TensorRT worker
-    AutoAim.Contracts/           # shared DTOs / generated IPC bindings
+  README.md            # Windows-specific implementation notes
 ```
+
+## Windows API Boundary
+
+- Use the `windows` crate for Win32, WinRT, D3D11, Direct2D, and
+  DirectComposition calls.
+- Use `Windows.Graphics.Capture` for explicit user-selected window or display
+  capture.
+- Keep frame pixels in a D3D11 texture ring buffer owned by Rust.
+- Use named pipes for MVP IPC with the JSON contracts in `contracts/ipc.md`.
+- Keep TensorRT behind an optional Cargo feature so the default build can run
+  through ONNX Runtime DirectML or CPU.
 
 ## Safety Boundary
 
-The Windows worker may read selected-window pixels through
+The Rust runtime may read selected-window pixels through
 `Windows.Graphics.Capture` and emit overlay metadata. It must not call
-`SendInput`, install hooks for third-party games, write process memory, or move
-the system cursor.
+`SendInput`, install hooks for third-party games, write process memory, attach
+to game processes, or move the system cursor.
 
-## First Implementation Task
+## Implemented Runtime Foundation
 
-Create a WinUI 3 window picker and preview surface:
+1. Rust workspace with `autoaim-core`, `autoaim-ipc`, `autoaim-runtime`, and
+   `autoaim-cli`.
+2. Rust JSONL frame model compatible with the current schema.
+3. Rust target scoring and inference event generation.
+4. Rust CLI commands for validation, evaluation, and suggestion event output.
 
-1. Ask the user to select a window/display with `GraphicsCapturePicker`.
+## Next Windows Implementation Tasks
+
+1. Build a Rust window picker and preview surface.
 2. Capture frames into a D3D11 texture ring buffer.
-3. Send `CaptureFrameMeta` messages over the named pipe contract.
+3. Emit `CaptureFrameMeta` over the named pipe contract.
 4. Render the latest frame and draw review-only boxes/points from
    `InferenceResult`.
 5. Allow dataset logging only after explicit opt-in.

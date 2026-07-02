@@ -1,0 +1,19 @@
+[package]
+name = "autoaim-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust CLI for AutoAim Review runtime and dataset operations."
+
+[[bin]]
+name = "autoaim"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+autoaim-core = { path = "../autoaim-core" }
+autoaim-ipc = { path = "../autoaim-ipc" }
+autoaim-runtime = { path = "../autoaim-runtime" }
+clap.workspace = true
+serde_json.workspace = true

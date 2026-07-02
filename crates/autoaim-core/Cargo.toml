@@ -1,0 +1,14 @@
+[package]
+name = "autoaim-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core geometry, frame models, and target scoring for AutoAim Review."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

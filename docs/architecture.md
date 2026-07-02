@@ -1,30 +1,57 @@
 # AutoAim Review Architecture
 
-AutoAim Review is a Windows-first capture and inference review application.
-It intentionally does not control the system mouse or third-party games. The
-runtime output is limited to overlays, suggestions, metrics, and dataset logs.
+AutoAim Review is a Rust-first Windows capture and inference review
+application. It intentionally does not control the system mouse or third-party
+games. Runtime output is limited to overlays, suggestions, metrics, and dataset
+logs.
+
+Python remains in the repository for training, annotation conversion, dataset
+validation, and offline evaluation. It is not the primary runtime.
 
 ## Runtime
 
 ```text
-Windows Capture Service
- -> Frame Ring Buffer
- -> Preprocess GPU/CPU
+Rust Desktop Shell
+ -> Rust Windows Capture
+ -> D3D11 / GPU Frame Ring Buffer
+ -> Rust Preprocess
  -> ONNX Runtime / TensorRT Inference
- -> Tracker + Target Scorer
- -> Overlay / Review UI
- -> Dataset Logger
+ -> Rust Tracker + Target Scorer
+ -> Rust Overlay Renderer
+ -> Rust Dataset Logger
+```
+
+## Workspace Layout
+
+```text
+crates/
+  autoaim-core/        # DTOs, geometry, JSONL, validation, scoring
+  autoaim-ipc/         # IPC event schemas and JSON line encoding
+  autoaim-runtime/     # scoring pipeline and JSONL runtime event logging
+  autoaim-cli/         # validate / evaluate / suggest commands
+  autoaim-capture/     # planned Windows.Graphics.Capture through windows-rs
+  autoaim-infer/       # planned ONNX Runtime wrapper, TensorRT feature gate
+  autoaim-app/         # planned desktop control panel and overlay renderer
+
+src/autoaim_review/    # Python offline dataset and evaluation tools
 ```
 
 ## Windows Client
 
-- Shell: WinUI 3 + .NET.
-- Native worker: C++/WinRT + Direct3D 11.
+- Language: Rust is the default for the application and runtime.
+- Windows bindings: `windows` crate for Win32, WinRT, D3D11, Direct2D, and
+  DirectComposition access.
+- Shell: Rust desktop shell using `winit` plus `egui`/`wgpu` for MVP controls.
+  A WinUI front-end can be revisited later only if native Windows UX becomes
+  more important than keeping the stack Rust-first.
 - Capture: `Windows.Graphics.Capture` first, `Desktop Duplication API` only
   after profiling proves the need.
-- IPC: named pipes for MVP, local gRPC after schemas stabilize.
-- Rendering: WinUI overlay with Direct2D/DirectComposition.
-- Packaging: MSIX with code signing for distribution.
+- Rendering: Rust overlay renderer backed by DirectComposition/Direct2D or
+  `wgpu`, depending on interop complexity.
+- IPC: named pipes with JSON messages for MVP; local gRPC or Cap'n Proto can
+  replace this after schemas stabilize.
+- Packaging: `cargo wix`, MSIX, or a signed installer once the runtime is
+  stable.
 
 ## Capture
 
@@ -38,9 +65,9 @@ Metadata is written per frame:
 - cursor position
 - mouse button state
 
-D3D11 textures remain in a ring buffer to avoid frequent CPU copies. The data
-logger may sample frames to disk only when the user explicitly enables dataset
-capture.
+D3D11 textures remain in a Rust-owned ring buffer to avoid frequent CPU copies.
+The data logger may sample frames to disk only when the user explicitly enables
+dataset capture.
 
 ## Inference
 
@@ -48,27 +75,27 @@ Training and runtime are separate:
 
 - Training: Python + PyTorch + Ultralytics YOLO or RT-DETR.
 - Export: ONNX.
-- Windows runtime: ONNX Runtime.
-- NVIDIA low-latency path: TensorRT.
+- Windows runtime: Rust wrapper around ONNX Runtime.
+- NVIDIA low-latency path: TensorRT behind an optional Cargo feature.
 - Fallback: ONNX Runtime DirectML or CPU.
 
 Pipeline:
 
 ```text
 D3D11 frame
- -> resize/letterbox
- -> normalize
+ -> Rust resize/letterbox
+ -> Rust normalize
  -> model inference
  -> person bbox / head bbox / head point
- -> tracker smoothing
- -> target scoring
- -> overlay draw
- -> metrics/logging
+ -> Rust tracker smoothing
+ -> Rust target scoring
+ -> Rust overlay draw
+ -> Rust metrics/logging
 ```
 
 ## Output
 
-The worker may output:
+The runtime may output:
 
 - `person_bbox`
 - `head_bbox`
@@ -78,11 +105,14 @@ The worker may output:
 - `dx/dy`
 - latency and FPS metrics
 
-The worker must not output OS input commands.
+The runtime must not output OS input commands.
 
 ## Dataset
 
 The JSONL frame format is defined in `schemas/frame_record.schema.json`.
+
+Rust owns runtime dataset recording. Python tools can validate, split, export,
+and evaluate those records offline.
 
 Splits must be grouped by recording session, map, scene, or capture source.
 Random frame-level splits are disallowed because adjacent frames leak nearly
@@ -92,14 +122,19 @@ Recommended tooling:
 
 - Annotation: CVAT or Label Studio.
 - Quality review: FiftyOne.
-- Local index: SQLite.
+- Local index: SQLite, written from Rust or Python depending on the workflow.
 - Large dataset versioning: DVC + S3/MinIO.
 
 ## MVP Milestones
 
-1. Window capture viewer with frame metadata logging.
-2. JSONL dataset logger and schema validation.
-3. CVAT/COCO/YOLO export and import scripts.
-4. ONNX inference loader and overlay draw.
-5. Metrics panel: latency, FPS, mAP proxy metrics, head localization error.
-6. TensorRT/FP16/GPU preprocess optimization.
+1. Done: create Rust workspace and shared `autoaim-core` message/model crate.
+2. Done: port target scoring from Python to Rust with parity tests.
+3. Done: add Rust JSONL reader, validation, evaluation summary, IPC schemas,
+   runtime event generation, and CLI commands.
+4. Next: build Rust window capture viewer with frame metadata logging.
+5. Next: add Rust named-pipe transport and explicit dataset logger controls.
+6. Next: add Rust ONNX Runtime inference loader and overlay draw.
+7. Next: add metrics panel: latency, FPS, mAP proxy metrics, head localization
+   error.
+8. Later: add TensorRT/FP16/GPU preprocess optimization behind optional
+   features.

@@ -5,8 +5,8 @@ click injection, game memory writes, or process manipulation commands.
 
 ## Processes
 
-- `AutoAim.Review.App`: WinUI 3 shell, overlay, review controls, metrics.
-- `AutoAim.Worker`: native capture and inference worker.
+- `autoaim-app`: Rust desktop shell, overlay, review controls, metrics.
+- `autoaim-runtime`: Rust capture, preprocess, inference, logging pipeline.
 - `autoaim-review`: offline Python CLI for dataset validation and metrics.
 
 ## Transport
@@ -35,7 +35,7 @@ are stable.
 }
 ```
 
-Frame pixels stay in the D3D11 ring buffer. Metadata crosses IPC.
+Frame pixels stay in the Rust-owned D3D11 ring buffer. Metadata crosses IPC.
 
 ### InferenceResult
 
