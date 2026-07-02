@@ -1,7 +1,5 @@
 use anyhow::Result;
-use autoaim_core::{
-    read_jsonl_path, summarize, suggest_frames, validate_records, TargetScorer,
-};
+use autoaim_core::{read_jsonl_path, suggest_frames, summarize, validate_records, TargetScorer};
 use autoaim_ipc::encode_json_line;
 use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
 use clap::{Parser, Subcommand};
@@ -45,6 +43,18 @@ enum Command {
         /// Output inference event JSONL file.
         output: PathBuf,
     },
+    /// Check for or apply updates from the Windows binary installation.
+    Update {
+        /// Show detected upstream changes without updating files.
+        #[arg(long)]
+        check: bool,
+        /// Print extra delta details when an incremental update is detected.
+        #[arg(long)]
+        show_diff: bool,
+        /// Override the installation directory used by windows/update.ps1.
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -65,6 +75,11 @@ fn run() -> Result<()> {
         Command::Evaluate { input, json } => evaluate(input, json),
         Command::Suggest { input } => suggest(input),
         Command::RunJsonl { input, output } => run_jsonl(input, output),
+        Command::Update {
+            check,
+            show_diff,
+            install_dir,
+        } => update(check, show_diff, install_dir),
     }
 }
 
@@ -137,4 +152,61 @@ fn run_jsonl(input: PathBuf, output: PathBuf) -> Result<()> {
     writer.flush()?;
     println!("processed {} frame records", records.len());
     Ok(())
+}
+
+fn update(check: bool, show_diff: bool, install_dir: Option<PathBuf>) -> Result<()> {
+    #[cfg(windows)]
+    {
+        return run_windows_updater(check, show_diff, install_dir);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (check, show_diff, install_dir);
+        anyhow::bail!(
+            "autoaim update is available only for the Windows installation created by windows/install.ps1"
+        )
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_updater(check: bool, show_diff: bool, install_dir: Option<PathBuf>) -> Result<()> {
+    use anyhow::Context;
+    use std::process::Command as ProcessCommand;
+
+    let updater = find_windows_updater()?;
+    let mut command = ProcessCommand::new(&updater);
+
+    if check {
+        command.arg("-CheckOnly");
+    }
+    if show_diff {
+        command.arg("-ShowDiff");
+    }
+    if let Some(path) = install_dir {
+        command.arg("-InstallDir").arg(path);
+    }
+
+    let status = command
+        .status()
+        .with_context(|| format!("failed to run updater at {}", updater.display()))?;
+    if !status.success() {
+        anyhow::bail!("updater exited with status {status}");
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn find_windows_updater() -> Result<PathBuf> {
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(bin_dir) = current_exe.parent() {
+            let sibling = bin_dir.join("autoaim-update.cmd");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+        }
+    }
+
+    Ok(PathBuf::from("autoaim-update.cmd"))
 }

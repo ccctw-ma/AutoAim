@@ -63,6 +63,47 @@ cargo run -p autoaim-cli -- suggest examples/sample_frames.jsonl
 cargo run -p autoaim-cli -- run-jsonl examples/sample_frames.jsonl .e2e-output/events.jsonl
 ```
 
+## Windows Install and Incremental Update
+
+Windows users should install the prebuilt release package. The target machine
+does not need Rust, Cargo, or Git.
+
+Direct install from the latest GitHub release:
+
+```powershell
+$installer = "$env:TEMP\autoaim-install.ps1"
+iwr https://raw.githubusercontent.com/ccctw-ma/AutoAim/main/windows/install.ps1 -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+The installer downloads `AutoAimReview-windows-x64.zip`, verifies it with
+`AutoAimReview-windows-x64-manifest.json`, installs it into
+`%LOCALAPPDATA%\AutoAimReview`, and adds the `bin` directory to the user `PATH`.
+Open a new terminal after installation.
+
+Check for an incremental update:
+
+```powershell
+autoaim-update -CheckOnly
+```
+
+Apply the incremental update:
+
+```powershell
+autoaim-update
+```
+
+The updater reads the installed version, downloads the release delta index, and
+applies only the matching old-version to new-version `.delta.json` patch after
+SHA256 verification. Changed files use 64 KiB block-level binary patches, so a
+small change in a large executable does not require downloading the full release
+zip. It does not compile locally and does not download a full replacement zip by
+default. If no matching delta exists, the updater stops and reports that a full
+reinstall is required.
+
+The Rust CLI exposes the same updater as `autoaim update --check` and
+`autoaim update`.
+
 ## Safety Rules
 
 This project intentionally excludes:

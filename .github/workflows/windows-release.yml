@@ -1,0 +1,79 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example v0.1.0
+        required: true
+      previous_package_url:
+        description: Optional previous AutoAimReview-windows-x64.zip URL for delta generation
+        required: false
+      previous_manifest_url:
+        description: Optional previous AutoAimReview-windows-x64-manifest.json URL for delta generation
+        required: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = "${{ github.ref_name }}"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Download previous package assets
+        if: ${{ github.event.inputs.previous_package_url != '' && github.event.inputs.previous_manifest_url != '' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\previous -Force | Out-Null
+          Invoke-WebRequest -Uri "${{ github.event.inputs.previous_package_url }}" -OutFile dist\previous\AutoAimReview-windows-x64.zip
+          Invoke-WebRequest -Uri "${{ github.event.inputs.previous_manifest_url }}" -OutFile dist\previous\AutoAimReview-windows-x64-manifest.json
+
+      - name: Build package with delta
+        if: ${{ github.event.inputs.previous_package_url != '' && github.event.inputs.previous_manifest_url != '' }}
+        shell: pwsh
+        run: |
+          python scripts\build_windows_package.py `
+            --version "${{ steps.version.outputs.value }}" `
+            --output-dir dist\windows `
+            --previous-package dist\previous\AutoAimReview-windows-x64.zip `
+            --previous-manifest dist\previous\AutoAimReview-windows-x64-manifest.json
+
+      - name: Build package
+        if: ${{ github.event.inputs.previous_package_url == '' || github.event.inputs.previous_manifest_url == '' }}
+        shell: pwsh
+        run: |
+          python scripts\build_windows_package.py `
+            --version "${{ steps.version.outputs.value }}" `
+            --output-dir dist\windows
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoAimReview-windows-x64
+          path: dist/windows/*
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          name: AutoAim Review ${{ steps.version.outputs.value }}
+          files: dist/windows/*
