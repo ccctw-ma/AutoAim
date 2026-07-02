@@ -10,8 +10,10 @@ use autoaim_core::{
 use autoaim_ipc::{
     AssistSuggestionEvent, InferenceProvider, InferenceResult, InferenceRuntimeConfig,
 };
-use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
-use serde::Serialize;
+use autoaim_runtime::{
+    mock_native_detections, JsonlEventWriter, LiveDetectionInput, ReviewPipeline,
+};
+use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -101,6 +103,28 @@ struct LiveMonitorSnapshot {
     review_only: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveDetectionRequest {
+    screen_id: String,
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+    cursor: Point,
+    model_path: Option<String>,
+    provider: Option<String>,
+    confidence_threshold: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveDetectionResult {
+    screen_id: String,
+    people: Vec<LivePersonPosition>,
+    model_status: String,
+    provider: String,
+    review_only: bool,
+}
+
 #[tauri::command]
 fn app_info() -> AppInfo {
     AppInfo {
@@ -183,6 +207,66 @@ fn live_monitor_snapshot(
                 .to_string(),
         review_only: true,
     })
+}
+
+#[tauri::command]
+fn detect_live_frame(request: LiveDetectionRequest) -> Result<LiveDetectionResult, String> {
+    let provider = request.provider.unwrap_or_else(|| "cuda".to_string());
+    let threshold = request.confidence_threshold.unwrap_or(0.25).clamp(0.0, 1.0);
+    let model_path = request
+        .model_path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let model_configured = model_path
+        .map(|value| Path::new(value).is_file())
+        .unwrap_or(false);
+
+    let (people, model_status) = if model_configured {
+        (
+            mock_native_detector(&request, threshold),
+            format!(
+                "native {provider} detector interface ready; ONNX/TensorRT execution backend pending model binding"
+            ),
+        )
+    } else {
+        (
+            mock_native_detector(&request, threshold),
+            "mock Rust detector active; configure an ONNX/TensorRT model for native GPU inference"
+                .to_string(),
+        )
+    };
+
+    Ok(LiveDetectionResult {
+        screen_id: request.screen_id,
+        people,
+        model_status,
+        provider,
+        review_only: true,
+    })
+}
+
+fn mock_native_detector(request: &LiveDetectionRequest, threshold: f32) -> Vec<LivePersonPosition> {
+    let input = LiveDetectionInput {
+        screen_origin: request.screen_origin,
+        screen_size: request.screen_size,
+        frame_size: request.frame_size,
+        cursor: request.cursor,
+        confidence_threshold: threshold,
+    };
+
+    mock_native_detections(&input)
+        .into_iter()
+        .map(|detection| LivePersonPosition {
+            object_index: detection.object_index,
+            bbox: detection.bbox,
+            head_point: detection.head_point,
+            confidence: detection.confidence,
+            track_id: detection.track_id,
+            dx: detection.dx,
+            dy: detection.dy,
+        })
+        .collect()
 }
 
 fn point_in_screen(point: Point, screen: &ScreenInfo) -> bool {
@@ -520,6 +604,7 @@ fn main() {
             inference_runtime_config,
             list_screens,
             live_monitor_snapshot,
+            detect_live_frame,
             validate_dataset,
             evaluate_dataset,
             preview_events,

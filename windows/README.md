@@ -51,7 +51,8 @@ to game processes, or move the system cursor.
    offline JSONL tools, update buttons, and English/Chinese language switching.
 
 The current GUI can show a live screen preview through the system screen picker
-and detect people in that preview with TensorFlow.js COCO-SSD. Native
+and send frame metadata through the Rust detector interface. This release uses a
+deterministic Rust mock detector for E2E validation and wiring. Native
 ONNX/TensorRT inference and overlay rendering are still planned runtime crates.
 
 ## Release Zip GUI Entry

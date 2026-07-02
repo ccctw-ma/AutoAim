@@ -20,8 +20,8 @@ const i18n = {
     liveStarted: "Live monitor started.",
     liveStoppedStatus: "Live monitor stopped.",
     screenShareUnavailable: "Screen capture is not available in this WebView.",
-    modelLoading: "Loading person detector...",
-    modelLoaded: "Person detector ready.",
+    modelLoading: "Running Rust detector...",
+    modelLoaded: "Rust detector ready.",
     modelUnavailable: "Person detector unavailable.",
     mousePosition: "Mouse position",
     peopleCount: "People",
@@ -110,8 +110,8 @@ const i18n = {
     liveStarted: "实时监控已启动。",
     liveStoppedStatus: "实时监控已停止。",
     screenShareUnavailable: "当前 WebView 不支持屏幕采集。",
-    modelLoading: "正在加载人物检测模型...",
-    modelLoaded: "人物检测模型已就绪。",
+    modelLoading: "正在运行 Rust 检测器...",
+    modelLoaded: "Rust 检测器已就绪。",
     modelUnavailable: "人物检测模型不可用。",
     mousePosition: "鼠标位置",
     peopleCount: "人物数",
@@ -188,9 +188,7 @@ const i18n = {
 const state = {
   language: localStorage.getItem("autoaim.language") || "en",
   liveTimer: null,
-  detectTimer: null,
   liveStream: null,
-  detector: null,
   detectedPeople: [],
   lastCursor: [0, 0],
   screens: [],
@@ -396,57 +394,30 @@ function renderPeople(people) {
   });
 }
 
-async function ensureDetector() {
-  if (state.detector) {
-    return state.detector;
-  }
-  if (!window.cocoSsd) {
-    throw new Error(t("modelUnavailable"));
-  }
-  els.modelStatusReadout.textContent = t("modelLoading");
-  const detector = await window.cocoSsd.load({ base: "lite_mobilenet_v2" });
-  state.detector = detector;
-  els.modelStatusReadout.textContent = t("modelLoaded");
-  return detector;
-}
-
 async function detectPeople(snapshot) {
   if (!els.monitorVideo.srcObject || els.monitorVideo.readyState < 2) {
     return [];
   }
-  const detector = await ensureDetector();
-  const predictions = await detector.detect(els.monitorVideo);
   const screen = state.screens.find((item) => item.id === snapshot.screen_id) || state.screens[0];
   if (!screen) {
     return [];
   }
-
-  const videoWidth = els.monitorVideo.videoWidth || els.monitorCanvas.width;
-  const videoHeight = els.monitorVideo.videoHeight || els.monitorCanvas.height;
-  const [originX, originY] = screen.origin;
-  const [screenW, screenH] = screen.size;
-  const scaleX = screenW / videoWidth;
-  const scaleY = screenH / videoHeight;
-
-  return predictions
-    .filter((prediction) => prediction.class === "person" && prediction.score >= 0.45)
-    .map((prediction, objectIndex) => {
-      const [x, y, w, h] = prediction.bbox;
-      const screenX = originX + x * scaleX;
-      const screenY = originY + y * scaleY;
-      const screenWBox = w * scaleX;
-      const screenHBox = h * scaleY;
-      const headPoint = [screenX + screenWBox / 2, screenY + screenHBox * 0.18];
-      return {
-        object_index: objectIndex,
-        bbox: [screenX, screenY, screenWBox, screenHBox],
-        head_point: headPoint,
-        confidence: prediction.score,
-        track_id: null,
-        dx: headPoint[0] - snapshot.cursor[0],
-        dy: headPoint[1] - snapshot.cursor[1],
-      };
-    });
+  els.modelStatusReadout.textContent = t("modelLoading");
+  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+  const result = await invoke("detect_live_frame", {
+    request: {
+      screenId: snapshot.screen_id,
+      screenOrigin: screen.origin,
+      screenSize: screen.size,
+      frameSize: [els.monitorVideo.videoWidth || els.monitorCanvas.width, els.monitorVideo.videoHeight || els.monitorCanvas.height],
+      cursor: snapshot.cursor,
+      modelPath: els.modelPath.value.trim(),
+      provider: els.providerSelect.value,
+      confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+    },
+  });
+  els.modelStatusReadout.textContent = result.model_status || t("modelLoaded");
+  return result.people;
 }
 
 async function refreshScreens() {
@@ -483,15 +454,12 @@ async function pollLiveSnapshot() {
   try {
     people = await detectPeople(snapshot);
     state.detectedPeople = people;
-    if (people.length > 0) {
-      els.modelStatusReadout.textContent = t("modelLoaded");
-    }
   } catch (error) {
     els.modelStatusReadout.textContent = error?.message || t("modelUnavailable");
   }
   els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
   els.peopleReadout.textContent = people.length;
-  if (!people.length && !state.detector) {
+  if (!people.length) {
     els.modelStatusReadout.textContent = snapshot.model_status;
   }
   renderPeople(people);
@@ -502,10 +470,6 @@ function stopLiveMonitor() {
   if (state.liveTimer) {
     clearInterval(state.liveTimer);
     state.liveTimer = null;
-  }
-  if (state.detectTimer) {
-    clearInterval(state.detectTimer);
-    state.detectTimer = null;
   }
   if (state.liveStream) {
     state.liveStream.getTracks().forEach((track) => track.stop());
@@ -610,9 +574,6 @@ els.startLiveBtn.addEventListener("click", async () => {
       await refreshScreens();
     }
     await startScreenCapture();
-    ensureDetector().catch((error) => {
-      els.modelStatusReadout.textContent = error?.message || t("modelUnavailable");
-    });
     await pollLiveSnapshot();
     if (state.liveTimer) {
       clearInterval(state.liveTimer);

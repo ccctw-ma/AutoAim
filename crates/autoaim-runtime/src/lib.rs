@@ -1,4 +1,4 @@
-use autoaim_core::{choose_target, AutoAimError, FrameRecord, TargetScorer};
+use autoaim_core::{choose_target, AutoAimError, FrameRecord, Point, TargetScorer};
 use autoaim_ipc::{encode_json_line, AssistSuggestionEvent, InferenceResult};
 use std::{
     fs::{File, OpenOptions},
@@ -191,6 +191,64 @@ impl DatasetLogger {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveDetectionInput {
+    pub screen_origin: [i32; 2],
+    pub screen_size: [u32; 2],
+    pub frame_size: [u32; 2],
+    pub cursor: Point,
+    pub confidence_threshold: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveDetection {
+    pub object_index: usize,
+    pub bbox: [f32; 4],
+    pub head_point: Point,
+    pub confidence: f32,
+    pub track_id: Option<u64>,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+pub trait LiveDetector {
+    fn detect(&self, input: &LiveDetectionInput) -> Vec<LiveDetection>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MockNativeDetector;
+
+impl LiveDetector for MockNativeDetector {
+    fn detect(&self, input: &LiveDetectionInput) -> Vec<LiveDetection> {
+        mock_native_detections(input)
+    }
+}
+
+pub fn mock_native_detections(input: &LiveDetectionInput) -> Vec<LiveDetection> {
+    if input.confidence_threshold > 0.90 {
+        return Vec::new();
+    }
+
+    let [origin_x, origin_y] = input.screen_origin;
+    let [screen_w, screen_h] = input.screen_size;
+    let [_frame_w, _frame_h] = input.frame_size;
+    let width = (screen_w as f32 * 0.14).clamp(72.0, 220.0);
+    let height = (screen_h as f32 * 0.38).clamp(160.0, 520.0);
+    let x = origin_x as f32 + screen_w as f32 * 0.5 - width / 2.0;
+    let y = origin_y as f32 + screen_h as f32 * 0.42 - height / 2.0;
+    let head_point = [x + width / 2.0, y + height * 0.18];
+
+    vec![LiveDetection {
+        object_index: 0,
+        bbox: [x, y, width, height],
+        head_point,
+        confidence: 0.91,
+        track_id: Some(1),
+        dx: head_point[0] - input.cursor[0],
+        dy: head_point[1] - input.cursor[1],
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +348,38 @@ mod tests {
         let (_result, assist) = pipeline.process_frame_with_assist(&frame);
 
         assert!(assist.is_none());
+    }
+
+    #[test]
+    fn mock_native_detector_returns_screen_space_person() {
+        let input = LiveDetectionInput {
+            screen_origin: [100, 50],
+            screen_size: [1920, 1080],
+            frame_size: [960, 540],
+            cursor: [960.0, 540.0],
+            confidence_threshold: 0.25,
+        };
+
+        let detector = MockNativeDetector;
+        let people = detector.detect(&input);
+
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].object_index, 0);
+        assert!(people[0].bbox[0] >= 100.0);
+        assert!(people[0].head_point[1] >= 50.0);
+        assert_eq!(people[0].track_id, Some(1));
+    }
+
+    #[test]
+    fn mock_native_detector_honors_high_threshold() {
+        let input = LiveDetectionInput {
+            screen_origin: [0, 0],
+            screen_size: [1920, 1080],
+            frame_size: [960, 540],
+            cursor: [960.0, 540.0],
+            confidence_threshold: 0.95,
+        };
+
+        assert!(mock_native_detections(&input).is_empty());
     }
 }

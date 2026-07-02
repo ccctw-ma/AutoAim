@@ -92,7 +92,8 @@ The GUI can:
 - use the system picker to select which screen to share,
 - draw the live screen preview into the app,
 - show the current mouse position in screen coordinates,
-- run browser-side COCO-SSD person detection and draw person/head positions,
+- send live frames through the Rust detector interface and draw person/head
+  positions returned by the backend,
 - select a frame JSONL file,
 - validate dataset records,
 - evaluate suggestions and show metrics,
@@ -112,9 +113,12 @@ Basic use:
 5. Watch the app display the live screen, cursor coordinates, and detected
    person/head positions.
 
-The live detector uses TensorFlow.js COCO-SSD in the WebView. It is suitable for
-showing person positions in the app UI. Native ONNX/TensorRT inference and a
-Rust overlay renderer are still planned runtime modules.
+The live detector path now goes through Rust. The current release includes a
+deterministic native mock detector so the app and E2E tests can validate the
+full UI/backend contract without shipping large model weights. Native
+ONNX/TensorRT inference and a Rust overlay renderer are still planned runtime
+modules; plug the production model into the configured model path/provider
+interface.
 
 ## Person Position Output
 
