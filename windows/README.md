@@ -46,12 +46,13 @@ to game processes, or move the system cursor.
 2. Rust JSONL frame model compatible with the current schema.
 3. Rust target scoring and inference event generation.
 4. Rust CLI commands for validation, evaluation, and suggestion event output.
-5. Rust + Tauri GUI for the current offline runtime, with English/Chinese
-   language switching.
+5. Rust + Tauri GUI with a live monitor first screen, screen selection, live
+   screen preview, real-time cursor coordinates, browser-side person detection,
+   offline JSONL tools, update buttons, and English/Chinese language switching.
 
-The current GUI intentionally supports the offline JSONL workflow only. Live
-capture, ONNX inference, and overlay rendering are disabled until their Rust
-runtime crates exist.
+The current GUI can show a live screen preview through the system screen picker
+and detect people in that preview with TensorFlow.js COCO-SSD. Native
+ONNX/TensorRT inference and overlay rendering are still planned runtime crates.
 
 ## Release Zip GUI Entry
 
@@ -68,6 +69,10 @@ The package contains:
 - `assets/logo.svg` and generated `assets/logo.ico`: package and shortcut
   branding.
 - `examples/sample_frames.jsonl`: bundled sample input for first launch.
+
+On first launch, click `Start now`, choose the screen in the system picker, and
+the app displays the live preview, mouse coordinates, and detected person
+positions. The app does not move the system mouse or inject input.
 
 ## Setup Installer
 

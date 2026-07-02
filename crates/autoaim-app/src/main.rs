@@ -70,6 +70,37 @@ struct UpdateCommandResult {
     output: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ScreenInfo {
+    id: String,
+    name: String,
+    origin: [i32; 2],
+    size: [u32; 2],
+    primary: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LivePersonPosition {
+    object_index: usize,
+    bbox: [f32; 4],
+    head_point: Point,
+    confidence: f32,
+    track_id: Option<u64>,
+    dx: f32,
+    dy: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveMonitorSnapshot {
+    screen_id: String,
+    cursor: Point,
+    cursor_on_screen: bool,
+    people: Vec<LivePersonPosition>,
+    model_status: String,
+    capture_status: String,
+    review_only: bool,
+}
+
 #[tauri::command]
 fn app_info() -> AppInfo {
     AppInfo {
@@ -105,6 +136,124 @@ fn inference_runtime_config(
         device_id,
         confidence_threshold.unwrap_or(0.25),
     ))
+}
+
+#[tauri::command]
+fn list_screens(window: tauri::Window) -> Result<Vec<ScreenInfo>, String> {
+    platform_list_screens(&window)
+}
+
+#[tauri::command]
+fn live_monitor_snapshot(
+    window: tauri::Window,
+    screen_id: String,
+    model_path: Option<String>,
+    provider: Option<String>,
+) -> Result<LiveMonitorSnapshot, String> {
+    let screens = platform_list_screens(&window)?;
+    let screen = screens
+        .iter()
+        .find(|item| item.id == screen_id)
+        .or_else(|| screens.iter().find(|item| item.primary))
+        .or_else(|| screens.first())
+        .ok_or_else(|| "no screens found".to_string())?;
+    let cursor = platform_cursor_position()?;
+    let cursor_on_screen = point_in_screen(cursor, screen);
+    let model_configured = model_path
+        .as_ref()
+        .map(|value| !value.trim().is_empty() && Path::new(value).is_file())
+        .unwrap_or(false);
+    let provider = provider.unwrap_or_else(|| "cuda".to_string());
+    let model_status = if model_configured {
+        format!(
+            "model configured for {provider}; live capture/inference backend is pending integration"
+        )
+    } else {
+        "no model configured; person list is empty".to_string()
+    };
+
+    Ok(LiveMonitorSnapshot {
+        screen_id: screen.id.clone(),
+        cursor,
+        cursor_on_screen,
+        people: Vec::new(),
+        model_status,
+        capture_status:
+            "screen video is provided by the system picker; backend reports cursor position"
+                .to_string(),
+        review_only: true,
+    })
+}
+
+fn point_in_screen(point: Point, screen: &ScreenInfo) -> bool {
+    let x = point[0];
+    let y = point[1];
+    let left = screen.origin[0] as f32;
+    let top = screen.origin[1] as f32;
+    let right = left + screen.size[0] as f32;
+    let bottom = top + screen.size[1] as f32;
+    x >= left && x < right && y >= top && y < bottom
+}
+
+#[cfg(target_os = "windows")]
+fn platform_cursor_position() -> Result<Point, String> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT { x: 0, y: 0 };
+    let ok = unsafe { GetCursorPos(&mut point) };
+    if ok == 0 {
+        return Err("GetCursorPos failed".to_string());
+    }
+
+    Ok([point.x as f32, point.y as f32])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_cursor_position() -> Result<Point, String> {
+    Err("live cursor monitoring is available only on Windows".to_string())
+}
+
+fn platform_list_screens(window: &tauri::Window) -> Result<Vec<ScreenInfo>, String> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| format!("failed to list screens: {error}"))?;
+    let primary = window
+        .primary_monitor()
+        .map_err(|error| format!("failed to query primary screen: {error}"))?;
+    let primary_key = primary.as_ref().map(monitor_key);
+
+    let screens = monitors
+        .iter()
+        .enumerate()
+        .map(|(index, monitor)| {
+            let size = monitor.size();
+            let position = monitor.position();
+            let key = monitor_key(monitor);
+            ScreenInfo {
+                id: format!("monitor-{}", index + 1),
+                name: monitor
+                    .name()
+                    .cloned()
+                    .unwrap_or_else(|| format!("Display {}", index + 1)),
+                origin: [position.x, position.y],
+                size: [size.width, size.height],
+                primary: primary_key.as_ref() == Some(&key),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if screens.is_empty() {
+        return Err("no screens found".to_string());
+    }
+
+    Ok(screens)
+}
+
+fn monitor_key(monitor: &tauri::Monitor) -> (i32, i32, u32, u32) {
+    let position = monitor.position();
+    let size = monitor.size();
+    (position.x, position.y, size.width, size.height)
 }
 
 #[tauri::command]
@@ -369,6 +518,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             inference_runtime_config,
+            list_screens,
+            live_monitor_snapshot,
             validate_dataset,
             evaluate_dataset,
             preview_events,

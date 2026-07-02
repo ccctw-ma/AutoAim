@@ -19,10 +19,10 @@
           </svg>
         </div>
         <div>
-          <p class="eyebrow" data-i18n="eyebrow">Rust + Tauri desktop review console</p>
+          <p class="eyebrow" data-i18n="eyebrow">Rust + Tauri live monitor</p>
           <h1 data-i18n="title">AutoAim Review</h1>
           <p class="subtitle" data-i18n="subtitle">
-            Inspect JSONL capture records, validate dataset quality, and produce review-only inference events.
+            Select a screen, start live monitoring, and inspect cursor plus person positions in real time.
           </p>
         </div>
         <div class="toolbar">
@@ -35,44 +35,47 @@
       </header>
 
       <main class="grid">
-        <section class="panel control-panel">
+        <section class="panel live-panel">
           <div class="panel-heading">
             <div>
-              <p class="section-kicker" data-i18n="workflowKicker">Workflow</p>
-              <h2 data-i18n="workflowTitle">Review a frame dataset</h2>
+              <p class="section-kicker" data-i18n="liveKicker">Live</p>
+              <h2 data-i18n="liveTitle">Monitor a screen</h2>
             </div>
             <span class="status-pill" id="statusPill" data-i18n="statusReady">Ready</span>
           </div>
 
           <div class="field-group">
-            <label for="inputPath" data-i18n="frameJsonl">Frame JSONL</label>
-            <div class="path-row">
-              <input id="inputPath" spellcheck="false" />
-              <button id="chooseInput" class="secondary" data-i18n="choose">Choose</button>
+            <label for="screenSelect" data-i18n="screen">Screen</label>
+            <select id="screenSelect"></select>
+          </div>
+
+          <div class="actions live-actions">
+            <button id="refreshScreensBtn" class="secondary" data-i18n="refreshScreens">Refresh screens</button>
+            <button id="startLiveBtn" class="primary" data-i18n="startLive">Start now</button>
+            <button id="stopLiveBtn" data-i18n="stopLive">Stop</button>
+          </div>
+
+          <div class="monitor-canvas-wrap">
+            <video id="monitorVideo" autoplay muted playsinline></video>
+            <canvas id="monitorCanvas" width="960" height="540"></canvas>
+            <div class="monitor-overlay">
+              <span id="liveState" data-i18n="liveStopped">Stopped</span>
             </div>
           </div>
 
-          <div class="field-group">
-            <label for="outputPath" data-i18n="eventOutput">Event output</label>
-            <div class="path-row">
-              <input id="outputPath" spellcheck="false" />
-              <button id="chooseOutput" class="secondary" data-i18n="saveAs">Save as</button>
-            </div>
-          </div>
-
-          <div class="actions">
-            <button id="validateBtn" data-i18n="validate">Validate</button>
-            <button id="evaluateBtn" data-i18n="evaluate">Evaluate</button>
-            <button id="positionsBtn" data-i18n="positions">Person positions</button>
-            <button id="previewBtn" data-i18n="preview">Preview events</button>
-            <button id="writeBtn" class="primary" data-i18n="writeEvents">Write events</button>
-          </div>
-
-          <div class="notice">
-            <strong data-i18n="safetyTitle">Safety boundary</strong>
-            <span data-i18n="safetyText">
-              This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.
-            </span>
+          <div class="live-readouts">
+            <article>
+              <span data-i18n="mousePosition">Mouse position</span>
+              <strong id="cursorReadout">-</strong>
+            </article>
+            <article>
+              <span data-i18n="peopleCount">People</span>
+              <strong id="peopleReadout">0</strong>
+            </article>
+            <article>
+              <span data-i18n="modelStatus">Model</span>
+              <strong id="modelStatusReadout">-</strong>
+            </article>
           </div>
         </section>
 
@@ -108,6 +111,51 @@
           <div class="actions update-actions">
             <button id="checkUpdatesBtn" data-i18n="checkUpdates">Check updates</button>
             <button id="applyUpdateBtn" class="primary" data-i18n="applyUpdate">Apply update</button>
+          </div>
+        </section>
+
+        <section class="panel people-panel">
+          <p class="section-kicker" data-i18n="peopleKicker">Positions</p>
+          <h2 data-i18n="peopleTitle">Detected people</h2>
+          <div id="peopleList" class="people-list"></div>
+          <div class="notice compact-notice">
+            <strong data-i18n="safetyTitle">Safety boundary</strong>
+            <span data-i18n="safetyText">
+              This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.
+            </span>
+          </div>
+        </section>
+
+        <section class="panel control-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker" data-i18n="workflowKicker">Offline</p>
+              <h2 data-i18n="workflowTitle">Dataset tools</h2>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="inputPath" data-i18n="frameJsonl">Frame JSONL</label>
+            <div class="path-row">
+              <input id="inputPath" spellcheck="false" />
+              <button id="chooseInput" class="secondary" data-i18n="choose">Choose</button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="outputPath" data-i18n="eventOutput">Event output</label>
+            <div class="path-row">
+              <input id="outputPath" spellcheck="false" />
+              <button id="chooseOutput" class="secondary" data-i18n="saveAs">Save as</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="validateBtn" data-i18n="validate">Validate</button>
+            <button id="evaluateBtn" data-i18n="evaluate">Evaluate</button>
+            <button id="positionsBtn" data-i18n="positions">Person positions</button>
+            <button id="previewBtn" data-i18n="preview">Preview events</button>
+            <button id="writeBtn" data-i18n="writeEvents">Write events</button>
           </div>
         </section>
 
@@ -166,6 +214,8 @@
       </main>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
     <script src="./main.js"></script>
   </body>
 </html>

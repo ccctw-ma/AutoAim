@@ -179,6 +179,7 @@ select:focus {
 }
 
 .control-panel,
+.live-panel,
 .console-panel {
   padding: 24px;
 }
@@ -273,6 +274,82 @@ button.ghost {
   margin-top: 22px;
 }
 
+.live-actions {
+  margin-top: 18px;
+}
+
+.monitor-canvas-wrap {
+  position: relative;
+  overflow: hidden;
+  margin-top: 20px;
+  border: 1px solid rgba(34, 211, 238, 0.24);
+  border-radius: 18px;
+  background: #07111f;
+}
+
+#monitorCanvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+}
+
+#monitorVideo {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.monitor-overlay {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+.monitor-overlay span {
+  display: inline-flex;
+  padding: 7px 10px;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 999px;
+  color: #c7f9ff;
+  background: rgba(15, 23, 42, 0.86);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.live-readouts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.live-readouts article {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(2, 6, 23, 0.42);
+}
+
+.live-readouts span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.live-readouts strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 8px;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .notice {
   display: grid;
   gap: 6px;
@@ -313,6 +390,41 @@ button.ghost {
 
 .update-actions {
   margin-top: 0;
+}
+
+.people-panel {
+  padding: 22px;
+}
+
+.people-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.person-row {
+  display: grid;
+  grid-template-columns: 46px repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.38);
+}
+
+.person-row span,
+.empty-people {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-notice {
+  margin-top: 16px;
+  padding: 13px;
 }
 
 .metric-card {

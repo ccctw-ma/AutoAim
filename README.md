@@ -20,9 +20,9 @@ Implemented now:
 - Rust target scoring that outputs `suggested_point` and `dx/dy`.
 - Rust validation, evaluation summary, person/head position, and inference
   event CLI.
-- Rust + Tauri GUI for selecting JSONL files, validating, evaluating, previewing
-  person/head positions, previewing events, writing inference event logs,
-  checking updates, and switching between English and Chinese.
+- Rust + Tauri GUI with a live monitor first screen, screen selection, live
+  screen preview, real-time cursor position, browser-side person detection,
+  offline JSONL tools, self-update controls, and English/Chinese switching.
 - Windows Setup installer, package logo assets, and installer-created
   shortcuts.
 - Frame annotation data model.
@@ -56,7 +56,7 @@ crates/
   autoaim-cli/         # implemented: validate / evaluate / suggest commands
   autoaim-capture/     # planned: Windows.Graphics.Capture through windows-rs
   autoaim-infer/       # planned: ONNX Runtime wrapper, TensorRT feature gate
-  autoaim-app/         # implemented: Tauri desktop UI for offline review
+  autoaim-app/         # implemented: Tauri desktop UI for live monitor + offline review
 ```
 
 Rust runtime commands:
@@ -74,7 +74,7 @@ cargo run -p autoaim-cli -- run-jsonl examples/sample_frames.jsonl .e2e-output/e
 ## Windows GUI
 
 The current Windows GUI is a Rust + Tauri desktop app. It is intended to make
-the existing offline review runtime usable through a normal desktop interface.
+the live monitor and offline review runtime usable through a normal desktop interface.
 It supports English and Chinese from the language selector in the top-right
 corner; the selection is saved locally.
 
@@ -88,6 +88,11 @@ cd .\AutoAimReview
 
 The GUI can:
 
+- start live monitoring from the first screen,
+- use the system picker to select which screen to share,
+- draw the live screen preview into the app,
+- show the current mouse position in screen coordinates,
+- run browser-side COCO-SSD person detection and draw person/head positions,
 - select a frame JSONL file,
 - validate dataset records,
 - evaluate suggestions and show metrics,
@@ -101,14 +106,15 @@ The GUI can:
 Basic use:
 
 1. Open `AutoAimReview.exe`.
-2. Select a frame JSONL file. The bundled sample is available after install.
-3. Click `Validate` to check schema/grouping issues.
-4. Click `Evaluate` to calculate review metrics.
-5. Click `Person positions` to inspect body boxes, head points, and offsets.
-6. Click `Write events` to export review-only inference event JSONL.
+2. Choose a screen from the live monitor panel.
+3. Click `Start now`.
+4. Pick the target screen in the system screen-sharing dialog.
+5. Watch the app display the live screen, cursor coordinates, and detected
+   person/head positions.
 
-Live window capture, ONNX inference, and overlay rendering are still planned
-runtime modules and are not enabled in this version.
+The live detector uses TensorFlow.js COCO-SSD in the WebView. It is suitable for
+showing person positions in the app UI. Native ONNX/TensorRT inference and a
+Rust overlay renderer are still planned runtime modules.
 
 ## Person Position Output
 

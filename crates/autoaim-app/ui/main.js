@@ -4,12 +4,33 @@ const dialog = tauriApi.dialog;
 
 const i18n = {
   en: {
-    eyebrow: "Rust + Tauri desktop review console",
+    eyebrow: "Rust + Tauri live monitor",
     title: "AutoAim Review",
-    subtitle: "Inspect JSONL capture records, validate dataset quality, and produce review-only inference events.",
+    subtitle: "Select a screen, start live monitoring, and inspect cursor plus person positions in real time.",
     languageLabel: "Language",
-    workflowKicker: "Workflow",
-    workflowTitle: "Review a frame dataset",
+    liveKicker: "Live",
+    liveTitle: "Monitor a screen",
+    screen: "Screen",
+    refreshScreens: "Refresh screens",
+    startLive: "Start now",
+    stopLive: "Stop",
+    liveStopped: "Stopped",
+    liveRunning: "Running",
+    liveStarting: "Starting live monitor...",
+    liveStarted: "Live monitor started.",
+    liveStoppedStatus: "Live monitor stopped.",
+    screenShareUnavailable: "Screen capture is not available in this WebView.",
+    modelLoading: "Loading person detector...",
+    modelLoaded: "Person detector ready.",
+    modelUnavailable: "Person detector unavailable.",
+    mousePosition: "Mouse position",
+    peopleCount: "People",
+    modelStatus: "Model",
+    peopleKicker: "Positions",
+    peopleTitle: "Detected people",
+    noPeople: "No people detected.",
+    workflowKicker: "Offline",
+    workflowTitle: "Dataset tools",
     statusReady: "Ready",
     frameJsonl: "Frame JSONL",
     choose: "Choose",
@@ -44,7 +65,7 @@ const i18n = {
     guide3: "Run evaluation to compute target suggestions and summary metrics.",
     guide4: "Write event JSONL when you need review-only inference results.",
     nextTitle: "Next runtime modules",
-    nextText: "Live capture, ONNX inference, and overlay rendering are planned Rust crates and are intentionally disabled here.",
+    nextText: "Live capture is connected to screen and cursor monitoring. Person inference requires a configured model backend.",
     consoleKicker: "Output",
     consoleTitle: "Command result",
     clear: "Clear",
@@ -69,14 +90,37 @@ const i18n = {
     noTauri: "Tauri API is not available. Run this page through AutoAimReview.exe.",
     selected: "Selected input file.",
     outputSelected: "Selected output file.",
+    screensLoaded: "Screens loaded.",
+    noScreens: "No screens available.",
   },
   zh: {
-    eyebrow: "Rust + Tauri 桌面审阅控制台",
+    eyebrow: "Rust + Tauri 实时监控",
     title: "AutoAim Review",
-    subtitle: "检查 JSONL 采集记录，验证数据集质量，并生成仅用于审阅的推理事件。",
+    subtitle: "选择屏幕后立即开始，实时查看鼠标位置和画面中的人物位置。",
     languageLabel: "语言",
-    workflowKicker: "流程",
-    workflowTitle: "审阅帧数据集",
+    liveKicker: "实时",
+    liveTitle: "监控屏幕",
+    screen: "屏幕",
+    refreshScreens: "刷新屏幕",
+    startLive: "立即开始",
+    stopLive: "停止",
+    liveStopped: "已停止",
+    liveRunning: "运行中",
+    liveStarting: "正在启动实时监控...",
+    liveStarted: "实时监控已启动。",
+    liveStoppedStatus: "实时监控已停止。",
+    screenShareUnavailable: "当前 WebView 不支持屏幕采集。",
+    modelLoading: "正在加载人物检测模型...",
+    modelLoaded: "人物检测模型已就绪。",
+    modelUnavailable: "人物检测模型不可用。",
+    mousePosition: "鼠标位置",
+    peopleCount: "人物数",
+    modelStatus: "模型",
+    peopleKicker: "位置",
+    peopleTitle: "识别到的人物",
+    noPeople: "暂未识别到人物。",
+    workflowKicker: "离线",
+    workflowTitle: "数据集工具",
     statusReady: "就绪",
     frameJsonl: "帧 JSONL",
     choose: "选择",
@@ -111,7 +155,7 @@ const i18n = {
     guide3: "执行评估，计算目标建议和汇总指标。",
     guide4: "需要审阅用推理结果时，写出事件 JSONL。",
     nextTitle: "后续运行时模块",
-    nextText: "实时采集、ONNX 推理和 overlay 渲染会作为 Rust crate 继续实现，此版本暂不启用。",
+    nextText: "实时功能已接入屏幕和鼠标监控；人物推理需要配置模型后端。",
     consoleKicker: "输出",
     consoleTitle: "命令结果",
     clear: "清空",
@@ -136,11 +180,21 @@ const i18n = {
     noTauri: "Tauri API 不可用，请通过 AutoAimReview.exe 打开本页面。",
     selected: "已选择输入文件。",
     outputSelected: "已选择输出文件。",
+    screensLoaded: "屏幕列表已加载。",
+    noScreens: "没有可用屏幕。",
   },
 };
 
 const state = {
   language: localStorage.getItem("autoaim.language") || "en",
+  liveTimer: null,
+  detectTimer: null,
+  liveStream: null,
+  detector: null,
+  detectedPeople: [],
+  lastCursor: [0, 0],
+  screens: [],
+  selectedScreenId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -148,6 +202,17 @@ const $ = (id) => document.getElementById(id);
 const els = {
   languageSelect: $("languageSelect"),
   statusPill: $("statusPill"),
+  screenSelect: $("screenSelect"),
+  refreshScreensBtn: $("refreshScreensBtn"),
+  startLiveBtn: $("startLiveBtn"),
+  stopLiveBtn: $("stopLiveBtn"),
+  monitorCanvas: $("monitorCanvas"),
+  monitorVideo: $("monitorVideo"),
+  liveState: $("liveState"),
+  cursorReadout: $("cursorReadout"),
+  peopleReadout: $("peopleReadout"),
+  modelStatusReadout: $("modelStatusReadout"),
+  peopleList: $("peopleList"),
   inputPath: $("inputPath"),
   outputPath: $("outputPath"),
   chooseInput: $("chooseInput"),
@@ -230,10 +295,248 @@ function setBusy(isBusy) {
     els.showRuntimeBtn,
     els.checkUpdatesBtn,
     els.applyUpdateBtn,
+    els.refreshScreensBtn,
+    els.startLiveBtn,
+    els.stopLiveBtn,
     els.chooseInput,
     els.chooseOutput,
   ].forEach((button) => {
     button.disabled = isBusy;
+  });
+}
+
+function drawMonitor(snapshot, people = state.detectedPeople) {
+  const canvas = els.monitorCanvas;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  if (els.monitorVideo.srcObject && els.monitorVideo.readyState >= 2) {
+    ctx.drawImage(els.monitorVideo, 0, 0, width, height);
+  } else {
+    ctx.fillStyle = "#07111f";
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  const grid = 48;
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.13)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < width; x += grid) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < height; y += grid) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+
+  const screen = state.screens.find((item) => item.id === snapshot.screen_id) || state.screens[0];
+  if (!screen) {
+    return;
+  }
+  const [originX, originY] = screen.origin;
+  const [screenW, screenH] = screen.size;
+  const scaleX = width / screenW;
+  const scaleY = height / screenH;
+
+  const cursorX = (snapshot.cursor[0] - originX) * scaleX;
+  const cursorY = (snapshot.cursor[1] - originY) * scaleY;
+  ctx.strokeStyle = "#22d3ee";
+  ctx.fillStyle = "#22d3ee";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cursorX - 12, cursorY);
+  ctx.lineTo(cursorX + 12, cursorY);
+  ctx.moveTo(cursorX, cursorY - 12);
+  ctx.lineTo(cursorX, cursorY + 12);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cursorX, cursorY, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#f97316";
+  ctx.fillStyle = "#f97316";
+  people.forEach((person) => {
+    const [x, y, w, h] = person.bbox;
+    const rectX = (x - originX) * scaleX;
+    const rectY = (y - originY) * scaleY;
+    ctx.strokeRect(rectX, rectY, w * scaleX, h * scaleY);
+    const headX = (person.head_point[0] - originX) * scaleX;
+    const headY = (person.head_point[1] - originY) * scaleY;
+    ctx.beginPath();
+    ctx.arc(headX, headY, 5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function renderPeople(people) {
+  els.peopleList.innerHTML = "";
+  if (!people.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-people";
+    empty.textContent = t("noPeople");
+    els.peopleList.appendChild(empty);
+    return;
+  }
+
+  people.forEach((person) => {
+    const item = document.createElement("article");
+    item.className = "person-row";
+    item.innerHTML = `
+      <strong>#${person.object_index}</strong>
+      <span>bbox [${person.bbox.map((value) => value.toFixed(0)).join(", ")}]</span>
+      <span>head [${person.head_point.map((value) => value.toFixed(0)).join(", ")}]</span>
+      <span>dx ${person.dx.toFixed(1)} / dy ${person.dy.toFixed(1)}</span>
+    `;
+    els.peopleList.appendChild(item);
+  });
+}
+
+async function ensureDetector() {
+  if (state.detector) {
+    return state.detector;
+  }
+  if (!window.cocoSsd) {
+    throw new Error(t("modelUnavailable"));
+  }
+  els.modelStatusReadout.textContent = t("modelLoading");
+  const detector = await window.cocoSsd.load({ base: "lite_mobilenet_v2" });
+  state.detector = detector;
+  els.modelStatusReadout.textContent = t("modelLoaded");
+  return detector;
+}
+
+async function detectPeople(snapshot) {
+  if (!els.monitorVideo.srcObject || els.monitorVideo.readyState < 2) {
+    return [];
+  }
+  const detector = await ensureDetector();
+  const predictions = await detector.detect(els.monitorVideo);
+  const screen = state.screens.find((item) => item.id === snapshot.screen_id) || state.screens[0];
+  if (!screen) {
+    return [];
+  }
+
+  const videoWidth = els.monitorVideo.videoWidth || els.monitorCanvas.width;
+  const videoHeight = els.monitorVideo.videoHeight || els.monitorCanvas.height;
+  const [originX, originY] = screen.origin;
+  const [screenW, screenH] = screen.size;
+  const scaleX = screenW / videoWidth;
+  const scaleY = screenH / videoHeight;
+
+  return predictions
+    .filter((prediction) => prediction.class === "person" && prediction.score >= 0.45)
+    .map((prediction, objectIndex) => {
+      const [x, y, w, h] = prediction.bbox;
+      const screenX = originX + x * scaleX;
+      const screenY = originY + y * scaleY;
+      const screenWBox = w * scaleX;
+      const screenHBox = h * scaleY;
+      const headPoint = [screenX + screenWBox / 2, screenY + screenHBox * 0.18];
+      return {
+        object_index: objectIndex,
+        bbox: [screenX, screenY, screenWBox, screenHBox],
+        head_point: headPoint,
+        confidence: prediction.score,
+        track_id: null,
+        dx: headPoint[0] - snapshot.cursor[0],
+        dy: headPoint[1] - snapshot.cursor[1],
+      };
+    });
+}
+
+async function refreshScreens() {
+  requireTauri();
+  const screens = await invoke("list_screens");
+  state.screens = screens;
+  els.screenSelect.innerHTML = "";
+  screens.forEach((screen) => {
+    const option = document.createElement("option");
+    option.value = screen.id;
+    option.textContent = `${screen.name} (${screen.size[0]}x${screen.size[1]})${screen.primary ? " *" : ""}`;
+    els.screenSelect.appendChild(option);
+  });
+  const primary = screens.find((screen) => screen.primary) || screens[0];
+  if (primary) {
+    state.selectedScreenId = primary.id;
+    els.screenSelect.value = primary.id;
+  }
+  return screens;
+}
+
+async function pollLiveSnapshot() {
+  const screenId = els.screenSelect.value || state.selectedScreenId;
+  if (!screenId) {
+    return;
+  }
+  const snapshot = await invoke("live_monitor_snapshot", {
+    screenId,
+    modelPath: els.modelPath.value.trim(),
+    provider: els.providerSelect.value,
+  });
+  state.lastCursor = snapshot.cursor;
+  let people = state.detectedPeople;
+  try {
+    people = await detectPeople(snapshot);
+    state.detectedPeople = people;
+    if (people.length > 0) {
+      els.modelStatusReadout.textContent = t("modelLoaded");
+    }
+  } catch (error) {
+    els.modelStatusReadout.textContent = error?.message || t("modelUnavailable");
+  }
+  els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
+  els.peopleReadout.textContent = people.length;
+  if (!people.length && !state.detector) {
+    els.modelStatusReadout.textContent = snapshot.model_status;
+  }
+  renderPeople(people);
+  drawMonitor(snapshot, people);
+}
+
+function stopLiveMonitor() {
+  if (state.liveTimer) {
+    clearInterval(state.liveTimer);
+    state.liveTimer = null;
+  }
+  if (state.detectTimer) {
+    clearInterval(state.detectTimer);
+    state.detectTimer = null;
+  }
+  if (state.liveStream) {
+    state.liveStream.getTracks().forEach((track) => track.stop());
+    state.liveStream = null;
+  }
+  els.monitorVideo.srcObject = null;
+  state.detectedPeople = [];
+  renderPeople([]);
+  els.liveState.textContent = t("liveStopped");
+  setStatus(t("liveStoppedStatus"), "ready");
+}
+
+async function startScreenCapture() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error(t("screenShareUnavailable"));
+  }
+  if (state.liveStream) {
+    state.liveStream.getTracks().forEach((track) => track.stop());
+  }
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      frameRate: 30,
+    },
+    audio: false,
+  });
+  state.liveStream = stream;
+  els.monitorVideo.srcObject = stream;
+  await els.monitorVideo.play();
+  const [track] = stream.getVideoTracks();
+  track.addEventListener("ended", () => {
+    stopLiveMonitor();
   });
 }
 
@@ -288,6 +591,45 @@ els.chooseOutput.addEventListener("click", async () => {
       setStatus(t("outputSelected"), "ready");
     }
   });
+});
+
+els.refreshScreensBtn.addEventListener("click", async () => {
+  await runAction(t("screensLoaded"), async () => {
+    const screens = await refreshScreens();
+    setStatus(screens.length ? t("screensLoaded") : t("noScreens"), screens.length ? "success" : "warning");
+  });
+});
+
+els.screenSelect.addEventListener("change", (event) => {
+  state.selectedScreenId = event.target.value;
+});
+
+els.startLiveBtn.addEventListener("click", async () => {
+  await runAction(t("liveStarting"), async () => {
+    if (!state.screens.length) {
+      await refreshScreens();
+    }
+    await startScreenCapture();
+    ensureDetector().catch((error) => {
+      els.modelStatusReadout.textContent = error?.message || t("modelUnavailable");
+    });
+    await pollLiveSnapshot();
+    if (state.liveTimer) {
+      clearInterval(state.liveTimer);
+    }
+    state.liveTimer = setInterval(() => {
+      pollLiveSnapshot().catch((error) => {
+        setStatus(error?.message || String(error), "error");
+        stopLiveMonitor();
+      });
+    }, 250);
+    els.liveState.textContent = t("liveRunning");
+    setStatus(t("liveStarted"), "success");
+  });
+});
+
+els.stopLiveBtn.addEventListener("click", () => {
+  stopLiveMonitor();
 });
 
 els.validateBtn.addEventListener("click", async () => {
@@ -379,6 +721,13 @@ if (!invoke) {
   setStatus(t("noTauri"), "error");
   log(t("noTauri"));
 } else {
+  refreshScreens()
+    .then((screens) => {
+      if (!screens.length) {
+        setStatus(t("noScreens"), "warning");
+      }
+    })
+    .catch((error) => log(error?.message || String(error)));
   invoke("app_info")
     .then((info) => log("AutoAim Review", info))
     .catch((error) => log(error?.message || String(error)));
