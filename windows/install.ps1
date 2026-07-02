@@ -110,10 +110,10 @@ function New-AppLauncherShim {
         [Parameter(Mandatory = $true)][string]$BinDir
     )
 
-    $guiScript = Join-Path $InstallRoot "windows\AutoAimReview.ps1"
+    $guiExe = Join-Path $InstallRoot "AutoAimReview.exe"
     $launcherCmd = @"
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$guiScript" %*
+start "" "$guiExe" %*
 "@
     Set-Content -Path (Join-Path $BinDir "autoaim-review.cmd") -Value $launcherCmd -Encoding ASCII
 }
@@ -147,7 +147,7 @@ function New-ApplicationShortcuts {
         [bool]$CreateStartMenuShortcut
     )
 
-    $launcher = Join-Path $BinDir "autoaim-review.cmd"
+    $launcher = Join-Path $InstallRoot "AutoAimReview.exe"
     $iconPath = Join-Path $InstallRoot "assets\logo.ico"
     if (-not (Test-Path $iconPath -PathType Leaf)) {
         $iconPath = Join-Path $BinDir "autoaim.exe"

@@ -61,6 +61,18 @@ jobs:
             --previous-package dist\previous\AutoAimReview-windows-x64.zip `
             --previous-manifest dist\previous\AutoAimReview-windows-x64-manifest.json
 
+      - name: Verify package delta
+        if: ${{ github.event.inputs.previous_package_url != '' && github.event.inputs.previous_manifest_url != '' }}
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          $oldManifest = Get-Content dist\previous\AutoAimReview-windows-x64-manifest.json -Raw | ConvertFrom-Json
+          $delta = "dist\windows\AutoAimReview-windows-x64-$($oldManifest.version)-to-$version.delta.json"
+          python scripts\verify_delta_update.py `
+            --old-package dist\previous\AutoAimReview-windows-x64.zip `
+            --delta $delta `
+            --new-manifest dist\windows\AutoAimReview-windows-x64-manifest.json
+
       - name: Build package
         if: ${{ github.event.inputs.previous_package_url == '' || github.event.inputs.previous_manifest_url == '' }}
         shell: pwsh

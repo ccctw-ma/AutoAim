@@ -5,6 +5,7 @@ members = [
     "crates/autoaim-ipc",
     "crates/autoaim-runtime",
     "crates/autoaim-cli",
+    "crates/autoaim-app",
 ]
 
 [workspace.package]
@@ -17,3 +18,5 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tauri = { version = "1.8", features = ["api-all"] }
+tauri-build = "1.5"

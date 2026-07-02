@@ -19,8 +19,9 @@ Implemented now:
 - Rust JSONL dataset reader/writer.
 - Rust target scoring that outputs `suggested_point` and `dx/dy`.
 - Rust validation, evaluation summary, and inference event CLI.
-- Windows GUI launcher for selecting JSONL files, validating, evaluating, and
-  writing inference event logs.
+- Rust + Tauri GUI for selecting JSONL files, validating, evaluating, previewing
+  events, writing inference event logs, and switching between English and
+  Chinese.
 - Windows Setup installer, package logo assets, and installer-created
   shortcuts.
 - Frame annotation data model.
@@ -54,7 +55,7 @@ crates/
   autoaim-cli/         # implemented: validate / evaluate / suggest commands
   autoaim-capture/     # planned: Windows.Graphics.Capture through windows-rs
   autoaim-infer/       # planned: ONNX Runtime wrapper, TensorRT feature gate
-  autoaim-app/         # planned: desktop shell, preview, overlay controls
+  autoaim-app/         # implemented: Tauri desktop UI for offline review
 ```
 
 Rust runtime commands:
@@ -69,17 +70,17 @@ cargo run -p autoaim-cli -- run-jsonl examples/sample_frames.jsonl .e2e-output/e
 
 ## Windows GUI
 
-The current Windows GUI is a packaged WinForms launcher over the Rust CLI. It is
-intended to make the existing offline review runtime usable by double-clicking.
-It does not yet implement live window capture, ONNX inference, or overlay
-rendering.
+The current Windows GUI is a Rust + Tauri desktop app. It is intended to make
+the existing offline review runtime usable through a normal desktop interface.
+It supports English and Chinese from the language selector in the top-right
+corner; the selection is saved locally.
 
 Run it from an extracted release zip:
 
 ```powershell
 Expand-Archive .\AutoAimReview-windows-x64.zip -DestinationPath .\AutoAimReview
 cd .\AutoAimReview
-.\AutoAimReview.cmd
+.\AutoAimReview.exe
 ```
 
 The GUI can:
@@ -88,7 +89,19 @@ The GUI can:
 - validate dataset records,
 - evaluate suggestions and show metrics,
 - preview `inference.result` events,
-- write event JSONL output.
+- write event JSONL output,
+- switch between English and Chinese.
+
+Basic use:
+
+1. Open `AutoAimReview.exe`.
+2. Select a frame JSONL file. The bundled sample is available after install.
+3. Click `Validate` to check schema/grouping issues.
+4. Click `Evaluate` to calculate review metrics.
+5. Click `Write events` to export review-only inference event JSONL.
+
+Live window capture, ONNX inference, and overlay rendering are still planned
+runtime modules and are not enabled in this version.
 
 ## Windows Install
 
@@ -116,7 +129,7 @@ Portable zip fallback:
 ```powershell
 Expand-Archive .\AutoAimReview-windows-x64.zip -DestinationPath .\AutoAimReview
 cd .\AutoAimReview
-.\AutoAimReview.cmd
+.\AutoAimReview.exe
 ```
 
 Scripted install fallback:
@@ -163,6 +176,10 @@ reinstall is required.
 
 The Rust CLI exposes the same updater as `autoaim update --check` and
 `autoaim update`.
+
+Release builds verify generated delta packages with
+`scripts/verify_delta_update.py` when a previous package and manifest are
+provided to the workflow.
 
 ## Safety Rules
 

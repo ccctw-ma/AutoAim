@@ -10,9 +10,8 @@ Current crates:
 - `autoaim-runtime`: offline/runtime pipeline primitives and JSONL event logging.
 - `autoaim-cli`: Rust command line entry point for validation, evaluation, and
   suggestion event output.
+- `autoaim-app`: Tauri desktop UI for the offline review workflow.
 - `autoaim-capture`: Windows capture through `windows-rs`.
 - `autoaim-infer`: ONNX Runtime and optional TensorRT integration.
-- `autoaim-app`: desktop shell, preview, overlay, and review controls.
 
-`autoaim-capture`, `autoaim-infer`, and `autoaim-app` are the next runtime
-crates to implement.
+`autoaim-capture` and `autoaim-infer` are the next runtime crates to implement.

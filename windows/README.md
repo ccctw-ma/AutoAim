@@ -12,14 +12,12 @@ crates/
   autoaim-ipc/         # implemented: JSON IPC event schemas
   autoaim-runtime/     # implemented: frame -> inference event pipeline
   autoaim-cli/         # implemented: validate / evaluate / suggest commands
+  autoaim-app/         # implemented: Rust + Tauri desktop UI
   autoaim-capture/     # planned: Windows.Graphics.Capture through windows-rs
   autoaim-infer/       # planned: ONNX Runtime wrapper, TensorRT feature gate
-  autoaim-app/         # planned: desktop shell, preview, overlay controls
 
 windows/
   README.md            # Windows-specific implementation notes
-  AutoAimReview.ps1    # implemented: WinForms GUI launcher
-  AutoAimReview.cmd    # implemented: double-click launcher for release zip
   installer/           # implemented: Inno Setup installer definition
 ```
 
@@ -48,24 +46,24 @@ to game processes, or move the system cursor.
 2. Rust JSONL frame model compatible with the current schema.
 3. Rust target scoring and inference event generation.
 4. Rust CLI commands for validation, evaluation, and suggestion event output.
-5. WinForms GUI launcher for the current offline runtime.
+5. Rust + Tauri GUI for the current offline runtime, with English/Chinese
+   language switching.
 
-The current GUI intentionally wraps the offline JSONL workflow only. Live
-capture, ONNX inference, and overlay rendering are disabled in the UI until
-their Rust runtime crates exist.
+The current GUI intentionally supports the offline JSONL workflow only. Live
+capture, ONNX inference, and overlay rendering are disabled until their Rust
+runtime crates exist.
 
 ## Release Zip GUI Entry
 
 After extracting `AutoAimReview-windows-x64.zip`, run:
 
 ```powershell
-.\AutoAimReview.cmd
+.\AutoAimReview.exe
 ```
 
 The package contains:
 
-- `AutoAimReview.cmd`: double-click GUI launcher.
-- `windows/AutoAimReview.ps1`: WinForms GUI implementation.
+- `AutoAimReview.exe`: Tauri GUI application.
 - `bin/autoaim.exe`: Rust CLI used by the GUI.
 - `assets/logo.svg` and generated `assets/logo.ico`: package and shortcut
   branding.
@@ -86,8 +84,7 @@ entry in Windows Settings.
 
 The setup installer installs the same files as the portable zip package:
 
-- `AutoAimReview.cmd`: GUI launcher.
-- `windows/AutoAimReview.ps1`: WinForms GUI implementation.
+- `AutoAimReview.exe`: Rust + Tauri GUI application.
 - `bin/autoaim.exe`: Rust CLI used by the GUI.
 - `assets/logo.svg` and generated `assets/logo.ico`: package and shortcut
   branding.
@@ -179,6 +176,9 @@ Windows package on `windows-latest` and uploads:
 - `AutoAimReview-windows-x64-manifest.json`
 - `AutoAimReview-windows-x64-deltas.json`
 - optional `AutoAimReview-windows-x64-<old>-to-<new>.delta.json`
+
+When previous release assets are supplied, the workflow verifies the generated
+delta with `scripts/verify_delta_update.py` before publishing.
 
 For a release with an incremental update, run the workflow manually and provide
 the previous release package URL plus previous manifest URL. The package builder

@@ -1,0 +1,22 @@
+[package]
+name = "autoaim-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tauri desktop UI for AutoAim Review."
+
+[[bin]]
+name = "AutoAimReview"
+path = "src/main.rs"
+
+[dependencies]
+autoaim-core = { path = "../autoaim-core" }
+autoaim-ipc = { path = "../autoaim-ipc" }
+autoaim-runtime = { path = "../autoaim-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true

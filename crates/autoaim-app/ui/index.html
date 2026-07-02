@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoAim Review</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 64 64" role="img">
+            <circle cx="32" cy="32" r="27" class="ring-muted" />
+            <circle cx="32" cy="32" r="17" class="ring-accent" />
+            <path d="M32 4v13M32 47v13M4 32h13M47 32h13" class="crosshair" />
+            <path d="M22 45 30 18c.7-2.2 3.3-2.2 4 0l8 27h-7l-1.4-5h-7.2L25 45h-3Zm6-11h8l-4-12-4 12Z" class="letter" />
+            <circle cx="32" cy="32" r="2.4" class="dot" />
+          </svg>
+        </div>
+        <div>
+          <p class="eyebrow" data-i18n="eyebrow">Rust + Tauri desktop review console</p>
+          <h1 data-i18n="title">AutoAim Review</h1>
+          <p class="subtitle" data-i18n="subtitle">
+            Inspect JSONL capture records, validate dataset quality, and produce review-only inference events.
+          </p>
+        </div>
+        <div class="toolbar">
+          <label class="select-label" for="languageSelect" data-i18n="languageLabel">Language</label>
+          <select id="languageSelect" aria-label="Language">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel control-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker" data-i18n="workflowKicker">Workflow</p>
+              <h2 data-i18n="workflowTitle">Review a frame dataset</h2>
+            </div>
+            <span class="status-pill" id="statusPill" data-i18n="statusReady">Ready</span>
+          </div>
+
+          <div class="field-group">
+            <label for="inputPath" data-i18n="frameJsonl">Frame JSONL</label>
+            <div class="path-row">
+              <input id="inputPath" spellcheck="false" />
+              <button id="chooseInput" class="secondary" data-i18n="choose">Choose</button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="outputPath" data-i18n="eventOutput">Event output</label>
+            <div class="path-row">
+              <input id="outputPath" spellcheck="false" />
+              <button id="chooseOutput" class="secondary" data-i18n="saveAs">Save as</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="validateBtn" data-i18n="validate">Validate</button>
+            <button id="evaluateBtn" data-i18n="evaluate">Evaluate</button>
+            <button id="previewBtn" data-i18n="preview">Preview events</button>
+            <button id="writeBtn" class="primary" data-i18n="writeEvents">Write events</button>
+          </div>
+
+          <div class="notice">
+            <strong data-i18n="safetyTitle">Safety boundary</strong>
+            <span data-i18n="safetyText">
+              This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.
+            </span>
+          </div>
+        </section>
+
+        <section class="panel metrics-panel">
+          <p class="section-kicker" data-i18n="metricsKicker">Metrics</p>
+          <h2 data-i18n="metricsTitle">Current run</h2>
+          <div class="metric-grid">
+            <article class="metric-card">
+              <span data-i18n="frames">Frames</span>
+              <strong id="framesMetric">-</strong>
+            </article>
+            <article class="metric-card">
+              <span data-i18n="objects">Objects</span>
+              <strong id="objectsMetric">-</strong>
+            </article>
+            <article class="metric-card">
+              <span data-i18n="targets">Targets</span>
+              <strong id="targetsMetric">-</strong>
+            </article>
+            <article class="metric-card">
+              <span data-i18n="confidence">Confidence</span>
+              <strong id="confidenceMetric">-</strong>
+            </article>
+            <article class="metric-card wide">
+              <span data-i18n="distance">Mean distance</span>
+              <strong id="distanceMetric">-</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel guide-panel">
+          <p class="section-kicker" data-i18n="guideKicker">How to use</p>
+          <h2 data-i18n="guideTitle">Four-step offline review</h2>
+          <ol>
+            <li data-i18n="guide1">Choose a frame JSONL file, or use the bundled sample file.</li>
+            <li data-i18n="guide2">Run validation to catch missing grouping fields or invalid boxes.</li>
+            <li data-i18n="guide3">Run evaluation to compute target suggestions and summary metrics.</li>
+            <li data-i18n="guide4">Write event JSONL when you need review-only inference results.</li>
+          </ol>
+          <div class="next-box">
+            <strong data-i18n="nextTitle">Next runtime modules</strong>
+            <p data-i18n="nextText">Live capture, ONNX inference, and overlay rendering are planned Rust crates and are intentionally disabled here.</p>
+          </div>
+        </section>
+
+        <section class="panel console-panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="section-kicker" data-i18n="consoleKicker">Output</p>
+              <h2 data-i18n="consoleTitle">Command result</h2>
+            </div>
+            <button id="clearLog" class="ghost" data-i18n="clear">Clear</button>
+          </div>
+          <pre id="logOutput"></pre>
+        </section>
+      </main>
+    </div>
+
+    <script src="./main.js"></script>
+  </body>
+</html>

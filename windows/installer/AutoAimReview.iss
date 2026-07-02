@@ -13,7 +13,7 @@
 #define AppName "AutoAim Review"
 #define AppPublisher "ccctw-ma"
 #define AppUrl "https://github.com/ccctw-ma/AutoAim"
-#define AppExeName "AutoAimReview.cmd"
+#define AppExeName "AutoAimReview.exe"
 
 [Setup]
 AppId={{7A89D7B1-F83C-4B35-AF10-211D5C8912D6}

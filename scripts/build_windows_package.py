@@ -277,20 +277,28 @@ def build_package(args: argparse.Namespace) -> None:
     assets_dir.mkdir(parents=True)
     examples_dir.mkdir(parents=True)
 
-    if args.exe_path:
-        exe_source = Path(args.exe_path).resolve()
+    if args.cli_exe_path or args.exe_path:
+        cli_source = Path(args.cli_exe_path or args.exe_path).resolve()
     elif not args.skip_build:
-        run(["cargo", "build", "--release", "-p", "autoaim-cli"], cwd=repo)
-        exe_source = repo / "target" / "release" / "autoaim.exe"
+        run(["cargo", "build", "--release", "-p", "autoaim-cli", "-p", "autoaim-app"], cwd=repo)
+        cli_source = repo / "target" / "release" / "autoaim.exe"
     else:
-        exe_source = repo / "target" / "release" / "autoaim.exe"
+        cli_source = repo / "target" / "release" / "autoaim.exe"
 
-    if not exe_source.exists():
-        raise FileNotFoundError(f"missing built executable: {exe_source}")
+    if args.app_exe_path:
+        app_source = Path(args.app_exe_path).resolve()
+    elif not args.skip_build:
+        app_source = repo / "target" / "release" / "AutoAimReview.exe"
+    else:
+        app_source = repo / "target" / "release" / "AutoAimReview.exe"
 
-    copy_file(exe_source, bin_dir / "autoaim.exe")
-    copy_file(repo / "windows" / "AutoAimReview.cmd", package_root / "AutoAimReview.cmd")
-    copy_file(repo / "windows" / "AutoAimReview.ps1", windows_dir / "AutoAimReview.ps1")
+    if not cli_source.exists():
+        raise FileNotFoundError(f"missing built CLI executable: {cli_source}")
+    if not app_source.exists():
+        raise FileNotFoundError(f"missing built app executable: {app_source}")
+
+    copy_file(app_source, package_root / "AutoAimReview.exe")
+    copy_file(cli_source, bin_dir / "autoaim.exe")
     copy_file(repo / "windows" / "install.ps1", windows_dir / "install.ps1")
     copy_file(repo / "windows" / "update.ps1", windows_dir / "update.ps1")
     copy_file(repo / "assets" / "logo.svg", assets_dir / "logo.svg")
@@ -349,7 +357,9 @@ def main() -> int:
     parser.add_argument("--output-dir", default="dist/windows")
     parser.add_argument("--previous-package")
     parser.add_argument("--previous-manifest")
-    parser.add_argument("--exe-path")
+    parser.add_argument("--exe-path", help="Deprecated alias for --cli-exe-path")
+    parser.add_argument("--cli-exe-path")
+    parser.add_argument("--app-exe-path")
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
 
