@@ -34,6 +34,7 @@ Typical flow from macOS:
 
 ```bash
 branch=$(git branch --show-current)
+version="dev-$(git rev-parse --short HEAD)"
 git push origin "$branch"
 
 ssh Admin@192.168.1.13 "; Set-Location 'D:\projects\AutoAim'; git status --short; git fetch origin; git checkout $branch; git pull --ff-only origin $branch"
@@ -42,7 +43,17 @@ ssh Admin@192.168.1.13 '; Set-Location "D:\projects\AutoAim"; New-Item -ItemType
 
 ssh Admin@192.168.1.13 '; Set-Location "D:\projects\AutoAim"; cargo build -p autoaim-cli *> ".e2e-output\cargo-build-cli.log"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python tests\rust_cli_e2e.py *> ".e2e-output\rust-cli-e2e.log"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
 
-ssh Admin@192.168.1.13 '; Set-Location "D:\projects\AutoAim"; python scripts\prepare_models.py *> ".e2e-output\prepare-models.log"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python scripts\build_windows_package.py --output-dir dist\windows *> ".e2e-output\windows-package.log"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+ssh Admin@192.168.1.13 '; Set-Location "D:\projects\AutoAim"; python scripts\prepare_models.py *> ".e2e-output\prepare-models.log"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python scripts\build_windows_package.py --version '"$version"' --output-dir dist\windows *> ".e2e-output\windows-package.log"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+```
+
+If the Windows workstation cannot reach `github.com:443`, keep GitHub as the
+source of truth but use a temporary Git bundle to move the already-pushed commit
+to Windows:
+
+```bash
+git bundle create /tmp/autoaim-main.bundle <old-windows-head>.."$branch"
+base64 -i /tmp/autoaim-main.bundle | tr -d '\n' | ssh Admin@192.168.1.13 '; $b64 = [Console]::In.ReadToEnd(); [IO.File]::WriteAllBytes("D:\projects\AutoAim\.e2e-output\autoaim-main.bundle", [Convert]::FromBase64String($b64))'
+ssh Admin@192.168.1.13 '; Set-Location "D:\projects\AutoAim"; git bundle verify ".e2e-output\autoaim-main.bundle"; git fetch ".e2e-output\autoaim-main.bundle" main:refs/remotes/bundle/main; git merge --ff-only refs/remotes/bundle/main'
 ```
 
 After a failure, inspect logs on Windows and copy the relevant evidence back into
@@ -55,6 +66,10 @@ ssh Admin@192.168.1.13 '; Get-Content "D:\projects\AutoAim\.e2e-output\cargo-tes
 mkdir -p .remote-logs/windows
 scp 'Admin@192.168.1.13:D:/projects/AutoAim/.e2e-output/*.log' .remote-logs/windows/
 ```
+
+On the current Windows OpenSSH setup, `scp` can close the connection. If that
+happens, inspect logs with `Get-Content` over `ssh`, or use the same base64-over-
+SSH pattern used for bundle transfer.
 
 Use the Windows logs and generated package output under `dist/windows` to guide
 the next macOS edit, then repeat the push/pull/build/test loop.
