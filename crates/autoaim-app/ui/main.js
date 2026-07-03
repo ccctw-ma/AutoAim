@@ -21,6 +21,7 @@ const i18n = {
     liveStarting: "Starting live monitor...",
     liveStarted: "Live monitor started.",
     liveStoppedStatus: "Live monitor stopped.",
+    liveBusy: "Live monitor is still processing a frame.",
     nativeCapture: "Native Windows capture",
     modelLoading: "Capturing screen and running detector...",
     modelLoaded: "Native detector ready.",
@@ -115,6 +116,7 @@ const i18n = {
     liveStarting: "正在启动实时监控...",
     liveStarted: "实时监控已启动。",
     liveStoppedStatus: "实时监控已停止。",
+    liveBusy: "实时监控仍在处理上一帧。",
     nativeCapture: "Windows 原生采集",
     modelLoading: "正在采集屏幕并运行检测器...",
     modelLoaded: "原生检测器已就绪。",
@@ -193,9 +195,14 @@ const i18n = {
   },
 };
 
+const LIVE_POLL_INTERVAL_MS = 250;
+
 const state = {
   language: localStorage.getItem("autoaim.language") || "en",
   liveTimer: null,
+  liveRunning: false,
+  livePolling: false,
+  liveSessionId: 0,
   detectedPeople: [],
   lastCursor: [0, 0],
   lastFrame: null,
@@ -508,48 +515,91 @@ async function refreshScreens() {
   return screens;
 }
 
-async function pollLiveSnapshot() {
+async function pollLiveSnapshot(sessionId = state.liveSessionId) {
+  if (state.livePolling) {
+    return false;
+  }
+
   const screenId = els.screenSelect.value || state.selectedScreenId;
   if (!screenId) {
+    return false;
+  }
+
+  state.livePolling = true;
+  els.modelStatusReadout.textContent = t("modelLoading");
+  try {
+    const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+    const snapshot = await invoke("live_monitor_snapshot", {
+      screenId,
+      modelPath: els.modelPath.value.trim(),
+      provider: els.providerSelect.value,
+      confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+    });
+    if (sessionId !== state.liveSessionId) {
+      return false;
+    }
+
+    state.lastCursor = snapshot.cursor;
+    state.lastFrame = snapshot.frame;
+    state.lastSnapshotSummary = {
+      screen_id: snapshot.screen_id,
+      cursor: snapshot.cursor,
+      cursor_on_screen: snapshot.cursor_on_screen,
+      people_count: (snapshot.people || []).length,
+      provider: snapshot.provider,
+      model_status: snapshot.model_status,
+      capture_status: snapshot.capture_status,
+      frame_size: snapshot.frame?.frame_size,
+      screen_size: snapshot.frame?.screen_size,
+      capture_backend: snapshot.frame?.capture_backend,
+    };
+    const people = snapshot.people || [];
+    state.detectedPeople = people;
+    els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
+    els.peopleReadout.textContent = people.length;
+    els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
+    els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
+    renderPeople(people);
+    drawMonitor(snapshot, people);
+    return true;
+  } finally {
+    state.livePolling = false;
+  }
+}
+
+function clearLiveTimer() {
+  if (state.liveTimer) {
+    clearTimeout(state.liveTimer);
+    state.liveTimer = null;
+  }
+}
+
+function scheduleLivePoll(sessionId) {
+  clearLiveTimer();
+  if (!state.liveRunning || sessionId !== state.liveSessionId) {
     return;
   }
-  els.modelStatusReadout.textContent = t("modelLoading");
-  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
-  const snapshot = await invoke("live_monitor_snapshot", {
-    screenId,
-    modelPath: els.modelPath.value.trim(),
-    provider: els.providerSelect.value,
-    confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
-  });
-  state.lastCursor = snapshot.cursor;
-  state.lastFrame = snapshot.frame;
-  state.lastSnapshotSummary = {
-    screen_id: snapshot.screen_id,
-    cursor: snapshot.cursor,
-    cursor_on_screen: snapshot.cursor_on_screen,
-    people_count: (snapshot.people || []).length,
-    provider: snapshot.provider,
-    model_status: snapshot.model_status,
-    capture_status: snapshot.capture_status,
-    frame_size: snapshot.frame?.frame_size,
-    screen_size: snapshot.frame?.screen_size,
-    capture_backend: snapshot.frame?.capture_backend,
-  };
-  const people = snapshot.people || [];
-  state.detectedPeople = people;
-  els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
-  els.peopleReadout.textContent = people.length;
-  els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
-  els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
-  renderPeople(people);
-  drawMonitor(snapshot, people);
+
+  state.liveTimer = setTimeout(async () => {
+    state.liveTimer = null;
+    if (!state.liveRunning || sessionId !== state.liveSessionId) {
+      return;
+    }
+
+    try {
+      await pollLiveSnapshot(sessionId);
+      scheduleLivePoll(sessionId);
+    } catch (error) {
+      setStatus(error?.message || String(error), "error");
+      stopLiveMonitor();
+    }
+  }, LIVE_POLL_INTERVAL_MS);
 }
 
 function stopLiveMonitor() {
-  if (state.liveTimer) {
-    clearInterval(state.liveTimer);
-    state.liveTimer = null;
-  }
+  state.liveRunning = false;
+  state.liveSessionId += 1;
+  clearLiveTimer();
   state.detectedPeople = [];
   state.lastFrame = null;
   state.lastSnapshotSummary = null;
@@ -625,19 +675,22 @@ els.screenSelect.addEventListener("change", (event) => {
 
 els.startLiveBtn.addEventListener("click", async () => {
   await runAction(t("liveStarting"), async () => {
+    if (state.livePolling) {
+      throw new Error(t("liveBusy"));
+    }
     if (!state.screens.length) {
       await refreshScreens();
     }
-    await pollLiveSnapshot();
-    if (state.liveTimer) {
-      clearInterval(state.liveTimer);
+    state.liveRunning = false;
+    clearLiveTimer();
+    state.liveSessionId += 1;
+    const liveSessionId = state.liveSessionId;
+    const didPoll = await pollLiveSnapshot(liveSessionId);
+    if (!didPoll) {
+      throw new Error(t("liveBusy"));
     }
-    state.liveTimer = setInterval(() => {
-      pollLiveSnapshot().catch((error) => {
-        setStatus(error?.message || String(error), "error");
-        stopLiveMonitor();
-      });
-    }, 250);
+    state.liveRunning = true;
+    scheduleLivePoll(liveSessionId);
     els.liveState.textContent = t("liveRunning");
     setStatus(t("liveStarted"), "success");
   });

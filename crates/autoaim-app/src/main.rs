@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use autoaim_capture::{capture_screen_frame, CapturedFramePreview};
+use autoaim_capture::{capture_screen_frame, CapturedFrame, CapturedFramePreview};
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
     ObjectTracker, Point, TargetScorer, ValidationDiagnostic,
@@ -28,6 +28,7 @@ use tauri::Manager;
 
 const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
+const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 
 #[derive(Debug, Serialize)]
@@ -146,6 +147,17 @@ struct LiveTrackingState {
     trackers: Mutex<HashMap<String, ObjectTracker>>,
 }
 
+#[derive(Debug)]
+struct CachedLiveDetector {
+    config: NativeInferenceConfig,
+    detector: NativePersonDetector,
+}
+
+#[derive(Default)]
+struct LiveDetectorState {
+    detector: Mutex<Option<CachedLiveDetector>>,
+}
+
 #[derive(Default)]
 struct OverlayState {
     active_screen_id: Mutex<Option<String>>,
@@ -197,6 +209,7 @@ fn list_screens(window: tauri::Window) -> Result<Vec<ScreenInfo>, String> {
 fn live_monitor_snapshot(
     app: tauri::AppHandle,
     tracking_state: tauri::State<LiveTrackingState>,
+    detector_state: tauri::State<LiveDetectorState>,
     overlay_state: tauri::State<OverlayState>,
     window: tauri::Window,
     screen_id: String,
@@ -211,11 +224,10 @@ fn live_monitor_snapshot(
         .or_else(|| screens.iter().find(|item| item.primary))
         .or_else(|| screens.first())
         .ok_or_else(|| "no screens found".to_string())?;
-    let frame = capture_screen_frame(screen.origin, screen.size, [960, 540])
+    let frame = capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
         .map_err(|error| error.to_string())?;
     let config = native_inference_config(provider, model_path, confidence_threshold)?;
-    let detector = NativePersonDetector::from_config(config).map_err(|error| error.to_string())?;
-    let inference = detector.detect(&frame).map_err(|error| error.to_string())?;
+    let inference = detect_with_cached_live_detector(&detector_state, config, &frame)?;
     let mut tracked_objects = inference.objects.clone();
     apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)
         .map_err(|error| error.to_string())?;
@@ -252,6 +264,35 @@ fn live_monitor_snapshot(
         provider: inference.provider.as_str().to_string(),
         review_only: true,
     })
+}
+
+fn detect_with_cached_live_detector(
+    detector_state: &LiveDetectorState,
+    config: NativeInferenceConfig,
+    frame: &CapturedFrame,
+) -> Result<autoaim_infer::InferenceOutput, String> {
+    let mut cached = detector_state
+        .detector
+        .lock()
+        .map_err(|_| "live detector state lock poisoned".to_string())?;
+    let should_reload = cached
+        .as_ref()
+        .map(|entry| entry.config != config)
+        .unwrap_or(true);
+
+    if should_reload {
+        let detector =
+            NativePersonDetector::from_config(config.clone()).map_err(|error| error.to_string())?;
+        *cached = Some(CachedLiveDetector { config, detector });
+    }
+
+    let detector = cached
+        .as_ref()
+        .ok_or_else(|| "live detector cache is empty".to_string())?;
+    detector
+        .detector
+        .detect(frame)
+        .map_err(|error| error.to_string())
 }
 
 fn native_inference_config(
@@ -810,6 +851,7 @@ fn escape_powershell_path(path: &Path) -> String {
 fn main() {
     tauri::Builder::default()
         .manage(LiveTrackingState::default())
+        .manage(LiveDetectorState::default())
         .manage(OverlayState::default())
         .invoke_handler(tauri::generate_handler![
             app_info,

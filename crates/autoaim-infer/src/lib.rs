@@ -133,7 +133,7 @@ pub struct MoveNetRawOutput {
     pub values: Vec<f32>,
 }
 
-pub trait PoseModel: fmt::Debug {
+pub trait PoseModel: fmt::Debug + Send {
     fn input_size(&self) -> u32;
     fn runtime_name(&self) -> &'static str {
         "custom pose model"
