@@ -28,7 +28,7 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 #[cfg(target_os = "windows")]
@@ -41,9 +41,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
+const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
+const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
+static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "windows")]
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 
@@ -133,7 +136,7 @@ struct LivePersonPosition {
 #[derive(Clone, Debug, Serialize)]
 struct LiveMonitorSnapshot {
     screen_id: String,
-    frame: CapturedFramePreview,
+    frame: Option<CapturedFramePreview>,
     cursor: Point,
     cursor_on_screen: bool,
     people: Vec<LivePersonPosition>,
@@ -253,6 +256,7 @@ async fn live_monitor_snapshot(
     model_path: Option<String>,
     provider: Option<String>,
     confidence_threshold: Option<f32>,
+    include_frame: Option<bool>,
 ) -> Result<LiveMonitorSnapshot, String> {
     let screens = platform_list_screens(&window)?;
     let screen = screens
@@ -275,6 +279,7 @@ async fn live_monitor_snapshot(
             &overlay_state,
             &screen,
             config,
+            include_frame.unwrap_or(true),
         )
     })
     .await
@@ -288,14 +293,56 @@ fn build_live_monitor_snapshot(
     overlay_state: &OverlayState,
     screen: &ScreenInfo,
     config: NativeInferenceConfig,
+    include_frame: bool,
 ) -> Result<LiveMonitorSnapshot, String> {
-    let frame = capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
-        .map_err(|error| error.to_string())?;
-    let inference = detect_with_cached_live_detector(&detector_state, config, &frame)?;
+    let sequence = LIVE_SNAPSHOT_SEQUENCE
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    let total_started = Instant::now();
+    let capture_started = Instant::now();
+    let frame = match capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
+    {
+        Ok(frame) => frame,
+        Err(error) => {
+            append_app_log(
+                "backend",
+                "live snapshot capture failed",
+                Some(&format!(
+                    r#"{{"sequence":{sequence},"screen_id":"{}","error":"{}"}}"#,
+                    screen.id,
+                    json_escape(&error.to_string())
+                )),
+            );
+            return Err(error.to_string());
+        }
+    };
+    let capture_ms = capture_started.elapsed().as_millis();
+
+    let detect_started = Instant::now();
+    let inference = match detect_with_cached_live_detector(&detector_state, config, &frame) {
+        Ok(inference) => inference,
+        Err(error) => {
+            append_app_log(
+                "backend",
+                "live snapshot inference failed",
+                Some(&format!(
+                    r#"{{"sequence":{sequence},"screen_id":"{}","capture_ms":{},"error":"{}"}}"#,
+                    screen.id,
+                    capture_ms,
+                    json_escape(&error)
+                )),
+            );
+            return Err(error);
+        }
+    };
+    let detect_ms = detect_started.elapsed().as_millis();
+
+    let tracking_started = Instant::now();
     let mut tracked_objects = inference.objects.clone();
     apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)
         .map_err(|error| error.to_string())?;
     let people = live_positions_from_objects(&tracked_objects, &inference.poses, frame.cursor);
+    let tracking_ms = tracking_started.elapsed().as_millis();
     let capture_status = format!(
         "native Windows capture [{}]: {}x{} preview from {}x{} screen",
         frame.capture_backend.as_str(),
@@ -316,10 +363,46 @@ fn build_live_monitor_snapshot(
             people: people.clone(),
         },
     );
+    let frame_preview = if include_frame {
+        Some(CapturedFramePreview::from(&frame))
+    } else {
+        None
+    };
+    let total_ms = total_started.elapsed().as_millis();
+    if should_log_live_snapshot(sequence, total_ms) {
+        let keypoints = people
+            .iter()
+            .map(|person| person.keypoints.len())
+            .sum::<usize>();
+        append_app_log(
+            "backend",
+            "live snapshot",
+            Some(&format!(
+                r#"{{"sequence":{sequence},"screen_id":"{}","capture_ms":{},"detect_ms":{},"tracking_ms":{},"total_ms":{},"include_frame":{},"capture_backend":"{}","frame_size":[{},{}],"screen_size":[{},{}],"objects":{},"poses":{},"people":{},"keypoints":{},"provider":"{}","model_status":"{}"}}"#,
+                screen.id,
+                capture_ms,
+                detect_ms,
+                tracking_ms,
+                total_ms,
+                include_frame,
+                frame.capture_backend.as_str(),
+                frame.frame_size[0],
+                frame.frame_size[1],
+                frame.screen_size[0],
+                frame.screen_size[1],
+                inference.objects.len(),
+                inference.poses.len(),
+                people.len(),
+                keypoints,
+                inference.provider.as_str(),
+                json_escape(&inference.model_status)
+            )),
+        );
+    }
 
     Ok(LiveMonitorSnapshot {
         screen_id: screen.id.clone(),
-        frame: CapturedFramePreview::from(&frame),
+        frame: frame_preview,
         cursor: frame.cursor,
         cursor_on_screen: frame.cursor_on_screen,
         people,
@@ -328,6 +411,10 @@ fn build_live_monitor_snapshot(
         provider: inference.provider.as_str().to_string(),
         review_only: true,
     })
+}
+
+fn should_log_live_snapshot(sequence: u64, total_ms: u128) -> bool {
+    sequence <= 5 || sequence % LIVE_SNAPSHOT_LOG_EVERY == 0 || total_ms >= LIVE_SNAPSHOT_SLOW_MS
 }
 
 fn detect_with_cached_live_detector(
@@ -540,6 +627,14 @@ fn append_app_log(scope: &str, message: &str, payload: Option<&str>) {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     }
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 #[tauri::command]

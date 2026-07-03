@@ -73,8 +73,9 @@ fn e2e_movenet_pose_outputs_screen_space_person_and_keypoints() {
 
     let output = detect_movenet_poses(&frame, &model, 0.25).unwrap();
 
-    assert_eq!(output.objects.len(), 1);
-    assert_eq!(output.poses.len(), 1);
+    assert!(!output.objects.is_empty());
+    assert!(output.objects.len() <= 4);
+    assert_eq!(output.objects.len(), output.poses.len());
     let object = &output.objects[0];
     let pose = &output.poses[0];
     assert_eq!(object.class_name, "person");

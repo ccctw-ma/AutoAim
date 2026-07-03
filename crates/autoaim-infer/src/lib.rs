@@ -20,6 +20,8 @@ use tract_onnx::prelude::*;
 pub const MOVENET_KEYPOINT_COUNT: usize = 17;
 pub const MOVENET_LIGHTNING_INPUT_SIZE: u32 = 192;
 pub const MOVENET_THUNDER_INPUT_SIZE: u32 = 256;
+const MOVENET_MAX_SCAN_POSES: usize = 4;
+const MOVENET_DUPLICATE_IOU_THRESHOLD: f32 = 0.35;
 pub const MOVENET_KEYPOINT_NAMES: [&str; MOVENET_KEYPOINT_COUNT] = [
     "nose",
     "left_eye",
@@ -105,6 +107,8 @@ pub struct MoveNetInput {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameToModelTransform {
     pub frame_size: [u32; 2],
+    pub source_origin: [f32; 2],
+    pub source_size: [f32; 2],
     pub screen_origin: [i32; 2],
     pub screen_size: [u32; 2],
     pub scale: f32,
@@ -114,9 +118,13 @@ pub struct FrameToModelTransform {
 
 impl FrameToModelTransform {
     pub fn model_point_to_screen(&self, model_x: f32, model_y: f32) -> Point {
-        let frame_x = ((model_x - self.pad_x) / self.scale)
+        let source_x =
+            ((model_x - self.pad_x) / self.scale).clamp(0.0, (self.source_size[0] - 1.0).max(0.0));
+        let source_y =
+            ((model_y - self.pad_y) / self.scale).clamp(0.0, (self.source_size[1] - 1.0).max(0.0));
+        let frame_x = (self.source_origin[0] + source_x)
             .clamp(0.0, self.frame_size[0].saturating_sub(1) as f32);
-        let frame_y = ((model_y - self.pad_y) / self.scale)
+        let frame_y = (self.source_origin[1] + source_y)
             .clamp(0.0, self.frame_size[1].saturating_sub(1) as f32);
         let screen_scale_x = self.screen_size[0] as f32 / self.frame_size[0].max(1) as f32;
         let screen_scale_y = self.screen_size[1] as f32 / self.frame_size[1].max(1) as f32;
@@ -266,13 +274,15 @@ impl PersonDetector for NativePersonDetector {
         if let Some(pose_model) = self.pose_model.as_deref() {
             let mut output =
                 detect_movenet_poses(frame, pose_model, self.config.confidence_threshold)?;
+            let scan_status = output.model_status.clone();
             output.provider = self.config.provider;
             output.model_status = format!(
-                "MoveNet {} backend active; requested provider {}; {} pose(s) and {} person object(s) produced",
+                "MoveNet {} backend active; requested provider {}; {} pose(s) and {} person object(s) produced; {}",
                 pose_model.runtime_name(),
                 self.config.provider.as_str(),
                 output.poses.len(),
-                output.objects.len()
+                output.objects.len(),
+                scan_status
             );
             return Ok(output);
         }
@@ -628,10 +638,17 @@ pub fn detect_movenet_poses<M: PoseModel + ?Sized>(
     model: &M,
     threshold: f32,
 ) -> Result<InferenceOutput, InferenceError> {
-    let input = prepare_movenet_input(frame, model.input_size())?;
-    let raw = model.infer(&input)?;
-    let pose = decode_movenet_output(&raw, &input.transform, input.size, threshold)?;
-    let poses = pose.into_iter().collect::<Vec<_>>();
+    let regions = movenet_scan_regions(frame);
+    let region_count = regions.len();
+    let mut poses = Vec::new();
+    for region in regions {
+        let input = prepare_movenet_input_region(frame, model.input_size(), region)?;
+        let raw = model.infer(&input)?;
+        if let Some(pose) = decode_movenet_output(&raw, &input.transform, input.size, threshold)? {
+            poses.push(pose);
+        }
+    }
+    let poses = dedupe_movenet_poses(poses);
     let objects = poses
         .iter()
         .enumerate()
@@ -642,13 +659,29 @@ pub fn detect_movenet_poses<M: PoseModel + ?Sized>(
         objects,
         poses,
         provider: NativeInferenceProvider::Cpu,
-        model_status: String::new(),
+        model_status: format!("scanned {region_count} MoveNet region(s)"),
     })
 }
 
 pub fn prepare_movenet_input(
     frame: &CapturedFrame,
     input_size: u32,
+) -> Result<MoveNetInput, InferenceError> {
+    let [frame_width, frame_height] = frame.frame_size;
+    prepare_movenet_input_region(
+        frame,
+        input_size,
+        MoveNetScanRegion {
+            origin: [0.0, 0.0],
+            size: [frame_width as f32, frame_height as f32],
+        },
+    )
+}
+
+fn prepare_movenet_input_region(
+    frame: &CapturedFrame,
+    input_size: u32,
+    region: MoveNetScanRegion,
 ) -> Result<MoveNetInput, InferenceError> {
     let [frame_width, frame_height] = frame.frame_size;
     if input_size == 0
@@ -661,22 +694,31 @@ pub fn prepare_movenet_input(
         ));
     }
 
-    let scale =
-        (input_size as f32 / frame_width as f32).min(input_size as f32 / frame_height as f32);
-    let resized_width = frame_width as f32 * scale;
-    let resized_height = frame_height as f32 * scale;
+    let source_width = region.size[0].clamp(1.0, frame_width as f32);
+    let source_height = region.size[1].clamp(1.0, frame_height as f32);
+    let source_origin_x = region.origin[0].clamp(0.0, frame_width.saturating_sub(1) as f32);
+    let source_origin_y = region.origin[1].clamp(0.0, frame_height.saturating_sub(1) as f32);
+    let max_source_width = frame_width as f32 - source_origin_x;
+    let max_source_height = frame_height as f32 - source_origin_y;
+    let source_width = source_width.min(max_source_width.max(1.0));
+    let source_height = source_height.min(max_source_height.max(1.0));
+    let scale = (input_size as f32 / source_width).min(input_size as f32 / source_height);
+    let resized_width = source_width * scale;
+    let resized_height = source_height * scale;
     let pad_x = (input_size as f32 - resized_width) / 2.0;
     let pad_y = (input_size as f32 - resized_height) / 2.0;
     let mut rgb = vec![0.0_f32; input_size as usize * input_size as usize * 3];
 
     for dst_y in 0..input_size as usize {
         for dst_x in 0..input_size as usize {
-            let src_x = ((dst_x as f32 + 0.5 - pad_x) / scale).floor();
-            let src_y = ((dst_y as f32 + 0.5 - pad_y) / scale).floor();
+            let src_x = source_origin_x + ((dst_x as f32 + 0.5 - pad_x) / scale).floor();
+            let src_y = source_origin_y + ((dst_y as f32 + 0.5 - pad_y) / scale).floor();
             if src_x < 0.0
                 || src_y < 0.0
                 || src_x >= frame_width as f32
                 || src_y >= frame_height as f32
+                || src_x >= source_origin_x + source_width
+                || src_y >= source_origin_y + source_height
             {
                 continue;
             }
@@ -696,6 +738,8 @@ pub fn prepare_movenet_input(
         rgb,
         transform: FrameToModelTransform {
             frame_size: frame.frame_size,
+            source_origin: [source_origin_x, source_origin_y],
+            source_size: [source_width, source_height],
             screen_origin: frame.screen_origin,
             screen_size: frame.screen_size,
             scale,
@@ -703,6 +747,148 @@ pub fn prepare_movenet_input(
             pad_y,
         },
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MoveNetScanRegion {
+    origin: [f32; 2],
+    size: [f32; 2],
+}
+
+fn movenet_scan_regions(frame: &CapturedFrame) -> Vec<MoveNetScanRegion> {
+    let [frame_width, frame_height] = frame.frame_size;
+    let width = frame_width as f32;
+    let height = frame_height as f32;
+    let mut regions = Vec::new();
+    push_movenet_region(&mut regions, width, height, 0.0, 0.0, width, height);
+    push_center_movenet_region(&mut regions, width, height, 0.72, 0.72);
+    push_center_movenet_region(&mut regions, width, height, 0.46, 0.56);
+    push_movenet_grid(&mut regions, width, height, 2, 2, 0.64, 0.64);
+    push_movenet_grid(&mut regions, width, height, 3, 2, 0.48, 0.62);
+    regions
+}
+
+fn push_center_movenet_region(
+    regions: &mut Vec<MoveNetScanRegion>,
+    frame_width: f32,
+    frame_height: f32,
+    width_ratio: f32,
+    height_ratio: f32,
+) {
+    let width = frame_width * width_ratio;
+    let height = frame_height * height_ratio;
+    let origin_x = (frame_width - width) / 2.0;
+    let origin_y = (frame_height - height) / 2.0;
+    push_movenet_region(
+        regions,
+        frame_width,
+        frame_height,
+        origin_x,
+        origin_y,
+        width,
+        height,
+    );
+}
+
+fn push_movenet_grid(
+    regions: &mut Vec<MoveNetScanRegion>,
+    frame_width: f32,
+    frame_height: f32,
+    columns: usize,
+    rows: usize,
+    width_ratio: f32,
+    height_ratio: f32,
+) {
+    let width = frame_width * width_ratio;
+    let height = frame_height * height_ratio;
+    let max_x = (frame_width - width).max(0.0);
+    let max_y = (frame_height - height).max(0.0);
+    for row in 0..rows {
+        let y = if rows <= 1 {
+            max_y / 2.0
+        } else {
+            max_y * row as f32 / (rows - 1) as f32
+        };
+        for column in 0..columns {
+            let x = if columns <= 1 {
+                max_x / 2.0
+            } else {
+                max_x * column as f32 / (columns - 1) as f32
+            };
+            push_movenet_region(regions, frame_width, frame_height, x, y, width, height);
+        }
+    }
+}
+
+fn push_movenet_region(
+    regions: &mut Vec<MoveNetScanRegion>,
+    frame_width: f32,
+    frame_height: f32,
+    origin_x: f32,
+    origin_y: f32,
+    width: f32,
+    height: f32,
+) {
+    if width < 8.0 || height < 8.0 {
+        return;
+    }
+    let origin_x = origin_x.clamp(0.0, (frame_width - 1.0).max(0.0));
+    let origin_y = origin_y.clamp(0.0, (frame_height - 1.0).max(0.0));
+    let width = width.min(frame_width - origin_x).max(1.0);
+    let height = height.min(frame_height - origin_y).max(1.0);
+    let duplicate = regions.iter().any(|existing| {
+        (existing.origin[0] - origin_x).abs() < 1.0
+            && (existing.origin[1] - origin_y).abs() < 1.0
+            && (existing.size[0] - width).abs() < 1.0
+            && (existing.size[1] - height).abs() < 1.0
+    });
+    if !duplicate {
+        regions.push(MoveNetScanRegion {
+            origin: [origin_x, origin_y],
+            size: [width, height],
+        });
+    }
+}
+
+fn dedupe_movenet_poses(mut poses: Vec<PoseEstimate>) -> Vec<PoseEstimate> {
+    poses.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut selected: Vec<PoseEstimate> = Vec::new();
+    for pose in poses {
+        if selected
+            .iter()
+            .any(|existing| bbox_iou(existing.bbox, pose.bbox) >= MOVENET_DUPLICATE_IOU_THRESHOLD)
+        {
+            continue;
+        }
+        selected.push(pose);
+        if selected.len() >= MOVENET_MAX_SCAN_POSES {
+            break;
+        }
+    }
+    selected
+}
+
+fn bbox_iou(left: [f32; 4], right: [f32; 4]) -> f32 {
+    let left_x2 = left[0] + left[2];
+    let left_y2 = left[1] + left[3];
+    let right_x2 = right[0] + right[2];
+    let right_y2 = right[1] + right[3];
+    let intersection_width = (left_x2.min(right_x2) - left[0].max(right[0])).max(0.0);
+    let intersection_height = (left_y2.min(right_y2) - left[1].max(right[1])).max(0.0);
+    let intersection = intersection_width * intersection_height;
+    let left_area = (left[2] * left[3]).max(0.0);
+    let right_area = (right[2] * right[3]).max(0.0);
+    let union = left_area + right_area - intersection;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 pub fn decode_movenet_output(
@@ -1154,12 +1340,14 @@ mod tests {
 
         let output = detector.detect(&frame).unwrap();
 
-        assert_eq!(output.objects.len(), 1);
-        assert_eq!(output.poses.len(), 1);
+        assert!(!output.objects.is_empty());
+        assert!(output.objects.len() <= MOVENET_MAX_SCAN_POSES);
+        assert_eq!(output.objects.len(), output.poses.len());
         assert_eq!(output.provider, NativeInferenceProvider::Cpu);
         assert!(output
             .model_status
-            .contains("MoveNet custom pose model backend active; requested provider cpu; 1 pose(s) and 1 person object(s) produced"));
+            .contains("MoveNet custom pose model backend active; requested provider cpu"));
+        assert!(output.model_status.contains("scanned"));
     }
 
     #[test]
@@ -1280,6 +1468,8 @@ mod tests {
             ],
             transform: FrameToModelTransform {
                 frame_size: [2, 2],
+                source_origin: [0.0, 0.0],
+                source_size: [2.0, 2.0],
                 screen_origin: [0, 0],
                 screen_size: [2, 2],
                 scale: 1.0,

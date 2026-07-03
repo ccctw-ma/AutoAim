@@ -216,9 +216,12 @@ const i18n = {
   },
 };
 
-const LIVE_POLL_INTERVAL_MS = 250;
+const LIVE_POLL_INTERVAL_MS = 16;
 const LIVE_SNAPSHOT_TIMEOUT_MS = 3500;
 const OPEN_OVERLAY_TIMEOUT_MS = 3500;
+const LIVE_PREVIEW_FRAME_INTERVAL = 15;
+const LIVE_WATCHDOG_INTERVAL_MS = 1000;
+const LIVE_STUCK_POLL_MS = 1500;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
 const SKELETON_CONNECTIONS = [
@@ -243,8 +246,11 @@ const SKELETON_CONNECTIONS = [
 const state = {
   language: localStorage.getItem("autoaim.language") || "zh",
   liveTimer: null,
+  liveWatchdogTimer: null,
   liveRunning: false,
   livePolling: false,
+  livePollSequence: 0,
+  livePollStartedAt: 0,
   liveSessionId: 0,
   detectedPeople: [],
   lastCursor: [0, 0],
@@ -723,11 +729,26 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
   }
 
   state.livePolling = true;
+  state.livePollStartedAt = Date.now();
+  state.livePollSequence += 1;
+  const pollSequence = state.livePollSequence;
+  const includeFrame =
+    state.previewFrameEnabled && (!state.lastFrame || pollSequence % LIVE_PREVIEW_FRAME_INTERVAL === 0);
+  const pollStartedAt = performance.now();
   els.modelStatusReadout.textContent = t("modelLoading");
+  if (pollSequence <= 5 || pollSequence % 60 === 0) {
+    writeFileLog("ui", "live poll start", {
+      sequence: pollSequence,
+      includeFrame,
+      screenId,
+      options: currentInferenceOptions(),
+    });
+  }
   try {
     const snapshot = await withTimeout(
       invoke("live_monitor_snapshot", {
         screenId,
+        includeFrame,
         ...currentInferenceOptions(),
       }),
       LIVE_SNAPSHOT_TIMEOUT_MS,
@@ -738,7 +759,10 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
     }
 
     state.lastCursor = snapshot.cursor;
-    state.lastFrame = snapshot.frame;
+    if (snapshot.frame) {
+      state.lastFrame = snapshot.frame;
+    }
+    const renderFrame = snapshot.frame || state.lastFrame;
     state.lastSnapshotSummary = {
       screen_id: snapshot.screen_id,
       cursor: snapshot.cursor,
@@ -747,9 +771,9 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
       provider: snapshot.provider,
       model_status: snapshot.model_status,
       capture_status: snapshot.capture_status,
-      frame_size: snapshot.frame?.frame_size,
-      screen_size: snapshot.frame?.screen_size,
-      capture_backend: snapshot.frame?.capture_backend,
+      frame_size: renderFrame?.frame_size,
+      screen_size: renderFrame?.screen_size,
+      capture_backend: renderFrame?.capture_backend,
     };
     const people = snapshot.people || [];
     state.detectedPeople = people;
@@ -758,12 +782,24 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
     els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
     els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
     renderPeople(people);
-    if (state.previewFrameEnabled) {
-      drawMonitor(snapshot, people);
+    if (state.previewFrameEnabled && renderFrame) {
+      drawMonitor({ ...snapshot, frame: renderFrame }, people);
+    }
+    const elapsedMs = performance.now() - pollStartedAt;
+    if (pollSequence <= 5 || pollSequence % 60 === 0 || elapsedMs > 100) {
+      writeFileLog("ui", "live poll finish", {
+        sequence: pollSequence,
+        elapsedMs: Number(elapsedMs.toFixed(1)),
+        includeFrame,
+        receivedFrame: Boolean(snapshot.frame),
+        people: people.length,
+        modelStatus: snapshot.model_status,
+      });
     }
     return true;
   } finally {
     state.livePolling = false;
+    state.livePollStartedAt = 0;
   }
 }
 
@@ -772,6 +808,34 @@ function clearLiveTimer() {
     clearTimeout(state.liveTimer);
     state.liveTimer = null;
   }
+}
+
+function clearLiveWatchdog() {
+  if (state.liveWatchdogTimer) {
+    clearInterval(state.liveWatchdogTimer);
+    state.liveWatchdogTimer = null;
+  }
+}
+
+function startLiveWatchdog(sessionId) {
+  clearLiveWatchdog();
+  state.liveWatchdogTimer = setInterval(() => {
+    if (!state.liveRunning || sessionId !== state.liveSessionId) {
+      clearLiveWatchdog();
+      return;
+    }
+    if (!state.livePolling || !state.livePollStartedAt) {
+      return;
+    }
+    const stuckMs = Date.now() - state.livePollStartedAt;
+    if (stuckMs >= LIVE_STUCK_POLL_MS) {
+      writeFileLog("ui", "live poll stuck", {
+        sequence: state.livePollSequence,
+        stuckMs,
+        timeoutMs: LIVE_SNAPSHOT_TIMEOUT_MS,
+      });
+    }
+  }, LIVE_WATCHDOG_INTERVAL_MS);
 }
 
 function scheduleLivePoll(sessionId, delayMs = LIVE_POLL_INTERVAL_MS) {
@@ -801,6 +865,8 @@ function stopLiveMonitor() {
   state.liveRunning = false;
   state.liveSessionId += 1;
   clearLiveTimer();
+  clearLiveWatchdog();
+  state.livePollStartedAt = 0;
   state.detectedPeople = [];
   state.lastFrame = null;
   state.lastSnapshotSummary = null;
@@ -1039,6 +1105,7 @@ on(els.startLiveBtn, "click", async () => {
     state.liveRunning = true;
     els.liveState.textContent = t("liveRunning");
     setStatus(t("liveStarted"), "success");
+    startLiveWatchdog(liveSessionId);
     scheduleLivePoll(liveSessionId, 0);
   });
 });
