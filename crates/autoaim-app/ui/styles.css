@@ -368,22 +368,6 @@ button.ghost {
   white-space: nowrap;
 }
 
-.notice {
-  display: grid;
-  gap: 6px;
-  margin-top: 22px;
-  padding: 16px;
-  border: 1px solid rgba(249, 115, 22, 0.24);
-  border-radius: 18px;
-  color: #fed7aa;
-  background: rgba(249, 115, 22, 0.08);
-}
-
-.notice span {
-  color: #fdba74;
-  line-height: 1.48;
-}
-
 .metric-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -990,26 +974,6 @@ pre {
   background: #ffffff;
   font: 12px/1.45 Consolas, "Cascadia Mono", "Courier New", monospace;
   white-space: pre-wrap;
-}
-
-.notice {
-  display: grid;
-  gap: 5px;
-  margin-top: 10px;
-  padding: 10px;
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 0;
-  background: #f5f5f5;
-}
-
-.notice strong {
-  font-size: 12px;
-}
-
-.notice span {
-  color: var(--muted);
-  line-height: 1.4;
 }
 
 .monitor-overlay,

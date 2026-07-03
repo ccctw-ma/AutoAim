@@ -17,11 +17,12 @@ use autoaim_ipc::{
 };
 use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
 use serde::Serialize;
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::{
     collections::HashMap,
     env,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -43,7 +44,6 @@ const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
 struct AppInfo {
     app_name: &'static str,
     runtime: &'static str,
-    safety_note: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,8 +197,6 @@ fn app_info() -> AppInfo {
     AppInfo {
         app_name: "AutoAim Review",
         runtime: "Rust + Tauri",
-        safety_note:
-            "Visualization-only: no mouse movement, clicks, input injection, or process control.",
     }
 }
 
@@ -474,7 +472,9 @@ fn log_file_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("AutoAimReview").join("logs").join("autoaim-review.log")
+    base.join("AutoAimReview")
+        .join("logs")
+        .join("autoaim-review.log")
 }
 
 fn append_app_log(scope: &str, message: &str, payload: Option<&str>) {
@@ -509,7 +509,10 @@ fn frontend_log(scope: String, message: String, payload: Option<String>) {
     append_app_log(&scope, &message, payload.as_deref());
 }
 
-fn activate_overlay_refresh(overlay_state: &OverlayState, screen_id: String) -> Result<u64, String> {
+fn activate_overlay_refresh(
+    overlay_state: &OverlayState,
+    screen_id: String,
+) -> Result<u64, String> {
     {
         let mut active_screen_id = overlay_state
             .active_screen_id
@@ -587,20 +590,30 @@ fn start_overlay_detection_loop(
         append_app_log(
             "backend",
             "overlay detection loop tick",
-            Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+            Some(&format!(
+                r#"{{"screen_id":"{}","generation":{generation}}}"#,
+                screen_id
+            )),
         );
         let overlay_state = app.state::<OverlayState>();
         if !overlay_refresh_is_current(&overlay_state, &screen_id, generation) {
             append_app_log(
                 "backend",
                 "overlay detection loop exit",
-                Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+                Some(&format!(
+                    r#"{{"screen_id":"{}","generation":{generation}}}"#,
+                    screen_id
+                )),
             );
             break;
         }
 
         let Some(window) = app.get_window(OVERLAY_WINDOW_LABEL) else {
-            append_app_log("backend", "overlay detection loop exit: window missing", None);
+            append_app_log(
+                "backend",
+                "overlay detection loop exit: window missing",
+                None,
+            );
             break;
         };
         let _ = sync_overlay_window(&window, &screen);
@@ -630,7 +643,11 @@ fn start_overlay_detection_loop(
                 append_app_log(
                     "backend",
                     "overlay detection error",
-                    Some(&format!(r#"{{"screen_id":"{}","error":"{}"}}"#, screen_id, error.replace('"', "'"))),
+                    Some(&format!(
+                        r#"{{"screen_id":"{}","error":"{}"}}"#,
+                        screen_id,
+                        error.replace('"', "'")
+                    )),
                 );
             }
         }
@@ -644,7 +661,10 @@ fn start_overlay_cursor_loop(app: tauri::AppHandle, screen: ScreenInfo, generati
     append_app_log(
         "backend",
         "overlay cursor loop start",
-        Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+        Some(&format!(
+            r#"{{"screen_id":"{}","generation":{generation}}}"#,
+            screen_id
+        )),
     );
     let mut tick = 0u64;
     thread::spawn(move || loop {
@@ -653,7 +673,10 @@ fn start_overlay_cursor_loop(app: tauri::AppHandle, screen: ScreenInfo, generati
             append_app_log(
                 "backend",
                 "overlay cursor loop exit",
-                Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+                Some(&format!(
+                    r#"{{"screen_id":"{}","generation":{generation}}}"#,
+                    screen_id
+                )),
             );
             break;
         }
@@ -772,21 +795,23 @@ fn open_overlay_window(
     let overlay = if let Some(existing) = app.get_window(OVERLAY_WINDOW_LABEL) {
         existing
     } else {
-        tauri::WindowBuilder::new(
+        let overlay_builder = tauri::WindowBuilder::new(
             &app,
             OVERLAY_WINDOW_LABEL,
             tauri::WindowUrl::App("overlay.html".into()),
         )
-        .title("AutoAim Overlay")
-        .transparent(true)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|error| format!("failed to create overlay window: {error}"))?
+        .title("AutoAim Overlay");
+        #[cfg(not(target_os = "macos"))]
+        let overlay_builder = overlay_builder.transparent(true);
+        overlay_builder
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .focused(false)
+            .visible(false)
+            .build()
+            .map_err(|error| format!("failed to create overlay window: {error}"))?
     };
 
     sync_overlay_window(&overlay, &screen)?;
@@ -1036,7 +1061,7 @@ fn apply_update(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = app;
+        let _ = (app, install_root);
         Err("self-update is available only in the Windows installed app".to_string())
     }
 }
@@ -1048,8 +1073,14 @@ fn run_update_command(
     let script = find_update_script(install_dir.as_deref())?;
     let install_root = install_root_for(script.as_path(), install_dir.as_deref())?;
 
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (script, install_root, check_only);
+        return Err("self-update is available only in the Windows installed app".to_string());
+    }
+
     #[cfg(target_os = "windows")]
-    let output = {
+    {
         let mut command = Command::new("powershell.exe");
         command.args([
             "-NoProfile",
@@ -1063,35 +1094,31 @@ fn run_update_command(
         if check_only {
             command.arg("-CheckOnly");
         }
-        command
+        let output = command
             .output()
-            .map_err(|error| format!("failed to run updater: {error}"))?
-    };
+            .map_err(|error| format!("failed to run updater: {error}"))?;
 
-    #[cfg(not(target_os = "windows"))]
-    let output = {
-        let _ = (script, install_root, check_only);
-        return Err("self-update is available only in the Windows installed app".to_string());
-    };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let text = if stderr.trim().is_empty() {
+            stdout.to_string()
+        } else {
+            format!("{stdout}\n{stderr}")
+        };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let text = if stderr.trim().is_empty() {
-        stdout.to_string()
-    } else {
-        format!("{stdout}\n{stderr}")
-    };
-
-    let (update_available, installed_version, latest_version) = parse_update_check_output(&text);
-    Ok(UpdateCommandResult {
-        success: output.status.success(),
-        output: text,
-        update_available,
-        installed_version,
-        latest_version,
-    })
+        let (update_available, installed_version, latest_version) =
+            parse_update_check_output(&text);
+        Ok(UpdateCommandResult {
+            success: output.status.success(),
+            output: text,
+            update_available,
+            installed_version,
+            latest_version,
+        })
+    }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_update_check_output(text: &str) -> (Option<bool>, Option<String>, Option<String>) {
     let mut installed_version = None;
     let mut latest_version = None;

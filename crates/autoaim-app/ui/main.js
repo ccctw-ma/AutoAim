@@ -6,7 +6,7 @@ const i18n = {
   en: {
     eyebrow: "Windows review utility",
     title: "AutoAim Review",
-    subtitle: "Select a screen and run visual monitoring. Review-only, no input control.",
+    subtitle: "Select a screen and run visual monitoring.",
     languageLabel: "Language",
     liveKicker: "Live",
     liveTitle: "Screen monitor",
@@ -66,8 +66,6 @@ const i18n = {
     noUpdateAvailable: "You are already on the latest version.",
     updateCheckFailed: "Update check failed.",
     updateApplyFailed: "Update could not start.",
-    safetyTitle: "Safety boundary",
-    safetyText: "This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.",
     metricsKicker: "Metrics",
     metricsTitle: "Current run",
     frames: "Frames",
@@ -114,7 +112,7 @@ const i18n = {
   zh: {
     eyebrow: "Windows 审阅工具",
     title: "AutoAim Review",
-    subtitle: "选择屏幕后进行视觉监测，仅用于审阅，不控制输入。",
+    subtitle: "选择屏幕后进行视觉监测。",
     languageLabel: "语言",
     liveKicker: "实时",
     liveTitle: "屏幕监测",
@@ -173,8 +171,6 @@ const i18n = {
     noUpdateAvailable: "当前已经是最新版本。",
     updateCheckFailed: "检查更新失败。",
     updateApplyFailed: "无法启动更新。",
-    safetyTitle: "安全边界",
-    safetyText: "本应用不会移动鼠标、点击、注入输入、附加进程，也不会控制游戏。",
     metricsKicker: "指标",
     metricsTitle: "当前运行",
     frames: "帧数",
@@ -222,6 +218,25 @@ const i18n = {
 
 const LIVE_POLL_INTERVAL_MS = 250;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
+const KEYPOINT_SCORE_THRESHOLD = 0.2;
+const SKELETON_CONNECTIONS = [
+  ["nose", "left_eye"],
+  ["nose", "right_eye"],
+  ["left_eye", "left_ear"],
+  ["right_eye", "right_ear"],
+  ["left_shoulder", "right_shoulder"],
+  ["left_shoulder", "left_elbow"],
+  ["left_elbow", "left_wrist"],
+  ["right_shoulder", "right_elbow"],
+  ["right_elbow", "right_wrist"],
+  ["left_shoulder", "left_hip"],
+  ["right_shoulder", "right_hip"],
+  ["left_hip", "right_hip"],
+  ["left_hip", "left_knee"],
+  ["left_knee", "left_ankle"],
+  ["right_hip", "right_knee"],
+  ["right_knee", "right_ankle"],
+];
 
 const state = {
   language: localStorage.getItem("autoaim.language") || "zh",
@@ -233,7 +248,7 @@ const state = {
   lastCursor: [0, 0],
   lastFrame: null,
   lastSnapshotSummary: null,
-  previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") === "true",
+  previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") !== "false",
   screens: [],
   selectedScreenId: null,
   updateCheckRunning: false,
@@ -443,6 +458,60 @@ function drawNativeFrame(ctx, canvas, frame) {
   ctx.drawImage(bitmapCanvas, 0, 0, canvas.width, canvas.height);
 }
 
+function visibleKeypointMap(keypoints) {
+  const points = new Map();
+  if (!Array.isArray(keypoints)) {
+    return points;
+  }
+  keypoints
+    .filter((keypoint) => keypoint.score >= KEYPOINT_SCORE_THRESHOLD)
+    .forEach((keypoint) => points.set(keypoint.name, keypoint));
+  return points;
+}
+
+function drawSkeleton(ctx, keypoints, projectPoint) {
+  const points = visibleKeypointMap(keypoints);
+  if (points.size < 2) {
+    return;
+  }
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = "#000000";
+  SKELETON_CONNECTIONS.forEach(([from, to]) => {
+    const start = points.get(from);
+    const end = points.get(to);
+    if (!start || !end) {
+      return;
+    }
+    const [x1, y1] = projectPoint(start.point);
+    const [x2, y2] = projectPoint(end.point);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  });
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#ffffff";
+  SKELETON_CONNECTIONS.forEach(([from, to]) => {
+    const start = points.get(from);
+    const end = points.get(to);
+    if (!start || !end) {
+      return;
+    }
+    const [x1, y1] = projectPoint(start.point);
+    const [x2, y2] = projectPoint(end.point);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
 function drawMonitor(snapshot, people = state.detectedPeople) {
   const canvas = els.monitorCanvas;
   const ctx = canvas.getContext("2d");
@@ -495,14 +564,17 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
     const [x, y, w, h] = person.bbox;
     const rectX = (x - originX) * scaleX;
     const rectY = (y - originY) * scaleY;
+    const projectPoint = (point) => [(point[0] - originX) * scaleX, (point[1] - originY) * scaleY];
+
     ctx.strokeStyle = "#000000";
     ctx.lineWidth = 4;
     ctx.strokeRect(rectX, rectY, w * scaleX, h * scaleY);
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;
     ctx.strokeRect(rectX, rectY, w * scaleX, h * scaleY);
-    const headX = (person.head_point[0] - originX) * scaleX;
-    const headY = (person.head_point[1] - originY) * scaleY;
+    drawSkeleton(ctx, person.keypoints, projectPoint);
+
+    const [headX, headY] = projectPoint(person.head_point);
     ctx.fillStyle = "#000000";
     ctx.beginPath();
     ctx.arc(headX, headY, 6, 0, Math.PI * 2);
@@ -515,10 +587,9 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
     if (Array.isArray(person.keypoints)) {
       ctx.fillStyle = "#ffffff";
       person.keypoints
-        .filter((keypoint) => keypoint.score >= 0.2)
+        .filter((keypoint) => keypoint.score >= KEYPOINT_SCORE_THRESHOLD)
         .forEach((keypoint) => {
-          const keypointX = (keypoint.point[0] - originX) * scaleX;
-          const keypointY = (keypoint.point[1] - originY) * scaleY;
+          const [keypointX, keypointY] = projectPoint(keypoint.point);
           ctx.beginPath();
           ctx.arc(keypointX, keypointY, 3, 0, Math.PI * 2);
           ctx.fill();
@@ -681,7 +752,7 @@ function clearLiveTimer() {
 
 function scheduleLivePoll(sessionId) {
   clearLiveTimer();
-  if (!state.liveRunning || sessionId !== state.liveSessionId || !state.previewFrameEnabled) {
+  if (!state.liveRunning || sessionId !== state.liveSessionId) {
     return;
   }
 
@@ -939,13 +1010,11 @@ on(els.startLiveBtn, "click", async () => {
     const liveSessionId = state.liveSessionId;
     await openOverlayForSelectedScreen();
     state.liveRunning = true;
-    if (state.previewFrameEnabled) {
-      const didPoll = await pollLiveSnapshot(liveSessionId);
-      if (!didPoll) {
-        throw new Error(t("liveBusy"));
-      }
-      scheduleLivePoll(liveSessionId);
+    const didPoll = await pollLiveSnapshot(liveSessionId);
+    if (!didPoll) {
+      throw new Error(t("liveBusy"));
     }
+    scheduleLivePoll(liveSessionId);
     els.liveState.textContent = t("liveRunning");
     setStatus(t("liveStarted"), "success");
   });
@@ -977,9 +1046,17 @@ on(els.previewFrameToggle, "change", (event) => {
     return;
   }
   if (enabled) {
-    scheduleLivePoll(state.liveSessionId);
-  } else {
-    clearLiveTimer();
+    const lastSnapshot = state.lastSnapshotSummary && state.lastFrame
+      ? {
+          screen_id: state.lastSnapshotSummary.screen_id,
+          frame: state.lastFrame,
+          cursor: state.lastCursor,
+          cursor_on_screen: state.lastSnapshotSummary.cursor_on_screen,
+        }
+      : null;
+    if (lastSnapshot) {
+      drawMonitor(lastSnapshot);
+    }
   }
 });
 
