@@ -3,7 +3,9 @@ use serde::Serialize;
 use std::{
     error::Error,
     fmt,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
+    thread::JoinHandle,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub type Point = [f32; 2];
@@ -76,6 +78,7 @@ pub enum CaptureError {
     NativeCallFailed(&'static str),
     BackendUnavailable(&'static str),
     UnsupportedPlatform(&'static str),
+    CaptureTimedOut,
 }
 
 impl fmt::Display for CaptureError {
@@ -87,6 +90,7 @@ impl fmt::Display for CaptureError {
             CaptureError::NativeCallFailed(call) => write!(formatter, "{call} failed"),
             CaptureError::BackendUnavailable(message) => formatter.write_str(message),
             CaptureError::UnsupportedPlatform(message) => formatter.write_str(message),
+            CaptureError::CaptureTimedOut => formatter.write_str("screen capture timed out"),
         }
     }
 }
@@ -154,6 +158,115 @@ fn unix_timestamp_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+struct CaptureRequest {
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+}
+
+type CaptureResponse = Result<(Vec<u8>, CaptureBackend), CaptureError>;
+
+/// Reusable screen capturer that keeps its native capture session alive across
+/// frames on a dedicated thread. Rebuilding the DXGI desktop-duplication
+/// session on every frame leaks GPU capture resources and can stall for many
+/// seconds; owning one long-lived session and talking to it over a channel lets
+/// callers apply a hard per-frame timeout instead of blocking forever.
+pub struct ScreenCapturer {
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+    request_tx: Sender<CaptureRequest>,
+    response_rx: Receiver<CaptureResponse>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ScreenCapturer {
+    pub fn new(
+        screen_origin: [i32; 2],
+        screen_size: [u32; 2],
+        max_frame_size: [u32; 2],
+    ) -> Result<Self, CaptureError> {
+        let frame_size = scaled_frame_size(screen_size, max_frame_size)?;
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<CaptureRequest>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<CaptureResponse>();
+
+        let worker = std::thread::Builder::new()
+            .name("autoaim-screen-capture".to_string())
+            .spawn(move || capture_worker_loop(request_rx, response_tx))
+            .map_err(|_| CaptureError::BackendUnavailable("failed to start capture thread"))?;
+
+        Ok(Self {
+            screen_origin,
+            screen_size,
+            frame_size,
+            request_tx,
+            response_rx,
+            worker: Some(worker),
+        })
+    }
+
+    pub fn matches(&self, screen_origin: [i32; 2], screen_size: [u32; 2]) -> bool {
+        self.screen_origin == screen_origin && self.screen_size == screen_size
+    }
+
+    /// Capture a single frame, giving up after `timeout` so a stalled native
+    /// capture call can never freeze the caller. On timeout the worker thread is
+    /// abandoned (it is dropped without being joined) so the next attempt starts
+    /// a fresh session.
+    pub fn capture(&mut self, timeout: Duration) -> Result<CapturedFrame, CaptureError> {
+        let cursor = cursor_position()?;
+        let cursor_on_screen = point_in_screen(cursor, self.screen_origin, self.screen_size);
+
+        self.request_tx
+            .send(CaptureRequest {
+                screen_origin: self.screen_origin,
+                screen_size: self.screen_size,
+                frame_size: self.frame_size,
+            })
+            .map_err(|_| CaptureError::BackendUnavailable("capture thread is not running"))?;
+
+        match self.response_rx.recv_timeout(timeout) {
+            Ok(Ok((rgba, capture_backend))) => Ok(CapturedFrame {
+                screen_origin: self.screen_origin,
+                screen_size: self.screen_size,
+                frame_size: self.frame_size,
+                capture_backend,
+                rgba,
+                cursor,
+                cursor_on_screen,
+                timestamp_millis: unix_timestamp_millis(),
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(RecvTimeoutError::Timeout) => {
+                // Abandon the stalled worker so the next capture starts fresh.
+                self.worker.take();
+                Err(CaptureError::CaptureTimedOut)
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.worker.take();
+                Err(CaptureError::BackendUnavailable("capture thread stopped"))
+            }
+        }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.worker.is_some()
+    }
+}
+
+fn capture_worker_loop(request_rx: Receiver<CaptureRequest>, response_tx: Sender<CaptureResponse>) {
+    while let Ok(request) = request_rx.recv() {
+        let result = capture_screen_region_rgba(
+            request.screen_origin,
+            request.screen_size,
+            request.frame_size,
+        );
+        if response_tx.send(result).is_err() {
+            break;
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

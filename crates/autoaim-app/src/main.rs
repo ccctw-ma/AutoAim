@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use autoaim_capture::{capture_screen_frame, cursor_position, CapturedFrame, CapturedFramePreview};
+use autoaim_capture::{cursor_position, CapturedFrame, CapturedFramePreview, ScreenCapturer};
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
     ObjectTracker, Point, TargetScorer, ValidationDiagnostic,
@@ -43,6 +43,7 @@ const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
 const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
+const LIVE_CAPTURE_TIMEOUT_MS: u64 = 1000;
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
@@ -194,6 +195,11 @@ struct LiveDetectorState {
     detector: Mutex<Option<CachedLiveDetector>>,
 }
 
+#[derive(Default)]
+struct LiveCaptureState {
+    capturer: Mutex<Option<ScreenCapturer>>,
+}
+
 struct OverlayState {
     active_screen_id: Mutex<Option<String>>,
     refresh_generation: AtomicU64,
@@ -271,11 +277,13 @@ async fn live_monitor_snapshot(
     tauri::async_runtime::spawn_blocking(move || {
         let tracking_state = app.state::<LiveTrackingState>();
         let detector_state = app.state::<LiveDetectorState>();
+        let capture_state = app.state::<LiveCaptureState>();
         let overlay_state = app.state::<OverlayState>();
         build_live_monitor_snapshot(
             &app,
             &tracking_state,
             &detector_state,
+            &capture_state,
             &overlay_state,
             &screen,
             config,
@@ -290,6 +298,7 @@ fn build_live_monitor_snapshot(
     app: &tauri::AppHandle,
     tracking_state: &LiveTrackingState,
     detector_state: &LiveDetectorState,
+    capture_state: &LiveCaptureState,
     overlay_state: &OverlayState,
     screen: &ScreenInfo,
     config: NativeInferenceConfig,
@@ -300,8 +309,7 @@ fn build_live_monitor_snapshot(
         .wrapping_add(1);
     let total_started = Instant::now();
     let capture_started = Instant::now();
-    let frame = match capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
-    {
+    let frame = match capture_with_cached_capturer(capture_state, screen) {
         Ok(frame) => frame,
         Err(error) => {
             append_app_log(
@@ -310,10 +318,10 @@ fn build_live_monitor_snapshot(
                 Some(&format!(
                     r#"{{"sequence":{sequence},"screen_id":"{}","error":"{}"}}"#,
                     screen.id,
-                    json_escape(&error.to_string())
+                    json_escape(&error)
                 )),
             );
-            return Err(error.to_string());
+            return Err(error);
         }
     };
     let capture_ms = capture_started.elapsed().as_millis();
@@ -415,6 +423,42 @@ fn build_live_monitor_snapshot(
 
 fn should_log_live_snapshot(sequence: u64, total_ms: u128) -> bool {
     sequence <= 5 || sequence % LIVE_SNAPSHOT_LOG_EVERY == 0 || total_ms >= LIVE_SNAPSHOT_SLOW_MS
+}
+
+fn capture_with_cached_capturer(
+    capture_state: &LiveCaptureState,
+    screen: &ScreenInfo,
+) -> Result<CapturedFrame, String> {
+    let mut cached = capture_state
+        .capturer
+        .lock()
+        .map_err(|_| "live capture state lock poisoned".to_string())?;
+
+    let needs_new = cached
+        .as_ref()
+        .map(|capturer| !capturer.is_alive() || !capturer.matches(screen.origin, screen.size))
+        .unwrap_or(true);
+    if needs_new {
+        let capturer = ScreenCapturer::new(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
+            .map_err(|error| error.to_string())?;
+        *cached = Some(capturer);
+    }
+
+    let capturer = cached
+        .as_mut()
+        .ok_or_else(|| "live capturer cache is empty".to_string())?;
+    let result = capturer.capture(Duration::from_millis(LIVE_CAPTURE_TIMEOUT_MS));
+
+    // Drop a stalled or dead capturer so the next call rebuilds a fresh session.
+    if matches!(
+        result,
+        Err(autoaim_capture::CaptureError::CaptureTimedOut)
+            | Err(autoaim_capture::CaptureError::BackendUnavailable(_))
+    ) {
+        *cached = None;
+    }
+
+    result.map_err(|error| error.to_string())
 }
 
 fn detect_with_cached_live_detector(
@@ -1265,6 +1309,7 @@ fn main() {
     tauri::Builder::default()
         .manage(LiveTrackingState::default())
         .manage(LiveDetectorState::default())
+        .manage(LiveCaptureState::default())
         .manage(OverlayState::default())
         .setup(|_app| {
             let log_path = log_file_path();
