@@ -52,8 +52,19 @@ const i18n = {
     modelPath: "Model path",
     modelPathPlaceholder: "Bundled model",
     showRuntime: "Show config",
-    checkUpdates: "Check updates",
-    applyUpdate: "Apply update",
+    updateStatusIdle: "Update",
+    updateStatusChecking: "Checking",
+    updateStatusReady: "Update ready",
+    updateStatusCurrent: "Up to date",
+    updateDialogKicker: "Update",
+    updateDialogTitle: "A new version is available",
+    updateDialogText: "AutoAim Review can restart now and apply the update.",
+    restartToUpdate: "Restart and update",
+    updateLater: "Later",
+    updateAvailable: "Update available.",
+    noUpdateAvailable: "You are already on the latest version.",
+    updateCheckFailed: "Update check failed.",
+    updateApplyFailed: "Update could not start.",
     safetyTitle: "Safety boundary",
     safetyText: "This app never moves the cursor, clicks, injects input, attaches to processes, or controls games.",
     metricsKicker: "Metrics",
@@ -148,8 +159,19 @@ const i18n = {
     modelPath: "模型路径",
     modelPathPlaceholder: "使用内置模型",
     showRuntime: "显示配置",
-    checkUpdates: "检查更新",
-    applyUpdate: "立即更新",
+    updateStatusIdle: "更新",
+    updateStatusChecking: "检查中",
+    updateStatusReady: "可更新",
+    updateStatusCurrent: "已是最新",
+    updateDialogKicker: "更新",
+    updateDialogTitle: "发现新版本",
+    updateDialogText: "AutoAim Review 可以现在重启并安装更新。",
+    restartToUpdate: "重启并更新",
+    updateLater: "稍后",
+    updateAvailable: "发现可用更新。",
+    noUpdateAvailable: "当前已经是最新版本。",
+    updateCheckFailed: "检查更新失败。",
+    updateApplyFailed: "无法启动更新。",
     safetyTitle: "安全边界",
     safetyText: "本应用不会移动鼠标、点击、注入输入、附加进程，也不会控制游戏。",
     metricsKicker: "指标",
@@ -198,6 +220,7 @@ const i18n = {
 };
 
 const LIVE_POLL_INTERVAL_MS = 250;
+const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
 
 const state = {
   language: localStorage.getItem("autoaim.language") || "zh",
@@ -211,6 +234,9 @@ const state = {
   lastSnapshotSummary: null,
   screens: [],
   selectedScreenId: null,
+  updateCheckRunning: false,
+  updateAvailable: false,
+  lastUpdateResult: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -247,8 +273,11 @@ const els = {
   confidenceInput: $("confidenceInput"),
   modelPath: $("modelPath"),
   showRuntimeBtn: $("showRuntimeBtn"),
-  checkUpdatesBtn: $("checkUpdatesBtn"),
-  applyUpdateBtn: $("applyUpdateBtn"),
+  updateStatusBtn: $("updateStatusBtn"),
+  updateDialog: $("updateDialog"),
+  updateVersionText: $("updateVersionText"),
+  dismissUpdateBtn: $("dismissUpdateBtn"),
+  restartUpdateBtn: $("restartUpdateBtn"),
   copyDiagnosticsBtn: $("copyDiagnosticsBtn"),
   clearLog: $("clearLog"),
   logOutput: $("logOutput"),
@@ -277,6 +306,7 @@ function applyLanguage(language) {
   document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
     node.placeholder = t(node.dataset.i18nPlaceholder);
   });
+  renderUpdateStatus();
 }
 
 function setStatus(message, tone = "ready") {
@@ -363,8 +393,6 @@ function setBusy(isBusy) {
     els.previewBtn,
     els.writeBtn,
     els.showRuntimeBtn,
-    els.checkUpdatesBtn,
-    els.applyUpdateBtn,
     els.refreshScreensBtn,
     els.startLiveBtn,
     els.stopLiveBtn,
@@ -658,6 +686,142 @@ async function runAction(statusText, action) {
   }
 }
 
+function updateResultHasAvailableUpdate(result) {
+  if (typeof result?.update_available === "boolean") {
+    return result.update_available;
+  }
+
+  const output = String(result?.output || "").toLowerCase();
+  if (output.includes("already up to date")) {
+    return false;
+  }
+  return output.includes("incremental update available");
+}
+
+function renderUpdateStatus() {
+  if (!els.updateStatusBtn) {
+    return;
+  }
+
+  let key = "updateStatusIdle";
+  let stateName = "idle";
+  if (state.updateCheckRunning) {
+    key = "updateStatusChecking";
+    stateName = "busy";
+  } else if (state.updateAvailable) {
+    key = "updateStatusReady";
+    stateName = "ready";
+  } else if (state.lastUpdateResult?.update_available === false) {
+    key = "updateStatusCurrent";
+    stateName = "current";
+  }
+
+  els.updateStatusBtn.textContent = t(key);
+  els.updateStatusBtn.dataset.state = stateName;
+  els.updateStatusBtn.disabled = state.updateCheckRunning;
+}
+
+function updateVersionSummary(result) {
+  const installed = result?.installed_version;
+  const latest = result?.latest_version;
+  if (installed && latest) {
+    return `${installed} -> ${latest}`;
+  }
+  return "";
+}
+
+function showUpdateDialog(result) {
+  if (!els.updateDialog) {
+    return;
+  }
+  const versionSummary = updateVersionSummary(result);
+  els.updateVersionText.textContent = versionSummary;
+  els.updateDialog.hidden = false;
+  els.restartUpdateBtn?.focus();
+}
+
+function hideUpdateDialog() {
+  if (els.updateDialog) {
+    els.updateDialog.hidden = true;
+  }
+}
+
+async function checkForUpdates(options = {}) {
+  const manual = Boolean(options.manual);
+  if (state.updateCheckRunning) {
+    return;
+  }
+
+  try {
+    requireTauri();
+  } catch (error) {
+    if (manual) {
+      setStatus(error?.message || String(error), "error");
+      log(error?.message || String(error));
+    }
+    return;
+  }
+
+  state.updateCheckRunning = true;
+  renderUpdateStatus();
+  if (manual) {
+    setStatus(t("checkingUpdates"), "busy");
+  }
+
+  try {
+    const result = await invoke("check_updates", { installDir: null });
+    if (!result.success) {
+      throw new Error(result.output || t("updateCheckFailed"));
+    }
+    state.lastUpdateResult = result;
+    state.updateAvailable = updateResultHasAvailableUpdate(result);
+
+    if (state.updateAvailable) {
+      setStatus(t("updateAvailable"), "warning");
+      log(t("updateAvailable"), result);
+      showUpdateDialog(result);
+    } else if (manual) {
+      setStatus(t("noUpdateAvailable"), "success");
+      log(t("noUpdateAvailable"), result);
+    }
+  } catch (error) {
+    if (manual) {
+      const message = error?.message || String(error);
+      setStatus(t("updateCheckFailed"), "error");
+      log(`${t("updateCheckFailed")} ${message}`);
+    }
+  } finally {
+    state.updateCheckRunning = false;
+    renderUpdateStatus();
+  }
+}
+
+async function restartAndApplyUpdate() {
+  try {
+    requireTauri();
+    if (els.restartUpdateBtn) {
+      els.restartUpdateBtn.disabled = true;
+    }
+    if (els.dismissUpdateBtn) {
+      els.dismissUpdateBtn.disabled = true;
+    }
+    setStatus(t("applyingUpdate"), "busy");
+    const result = await invoke("apply_update", { installDir: null });
+    setStatus(t("applyUpdateStarted"), result.success ? "success" : "warning");
+    log(t("applyUpdateStarted"), result);
+  } catch (error) {
+    const message = error?.message || String(error);
+    setStatus(t("updateApplyFailed"), "error");
+    log(`${t("updateApplyFailed")} ${message}`);
+    if (els.restartUpdateBtn) {
+      els.restartUpdateBtn.disabled = false;
+    }
+    if (els.dismissUpdateBtn) {
+      els.dismissUpdateBtn.disabled = false;
+    }
+  }
+}
+
 on(els.languageSelect, "change", (event) => {
   applyLanguage(event.target.value);
 });
@@ -807,20 +971,32 @@ on(els.showRuntimeBtn, "click", async () => {
   });
 });
 
-on(els.checkUpdatesBtn, "click", async () => {
-  await runAction(t("checkingUpdates"), async () => {
-    const result = await invoke("check_updates", { installDir: null });
-    setStatus(t("updateCheckDone"), result.success ? "success" : "warning");
-    log(t("updateCheckDone"), result);
-  });
+on(els.updateStatusBtn, "click", async () => {
+  if (state.updateAvailable && state.lastUpdateResult) {
+    showUpdateDialog(state.lastUpdateResult);
+    return;
+  }
+  await checkForUpdates({ manual: true });
 });
 
-on(els.applyUpdateBtn, "click", async () => {
-  await runAction(t("applyingUpdate"), async () => {
-    const result = await invoke("apply_update", { installDir: null });
-    setStatus(t("applyUpdateStarted"), result.success ? "success" : "warning");
-    log(t("applyUpdateStarted"), result);
-  });
+on(els.dismissUpdateBtn, "click", () => {
+  hideUpdateDialog();
+});
+
+on(els.restartUpdateBtn, "click", async () => {
+  await restartAndApplyUpdate();
+});
+
+on(els.updateDialog, "click", (event) => {
+  if (event.target === els.updateDialog) {
+    hideUpdateDialog();
+  }
+});
+
+on(document, "keydown", (event) => {
+  if (event.key === "Escape" && !els.updateDialog?.hidden) {
+    hideUpdateDialog();
+  }
 });
 
 on(els.copyDiagnosticsBtn, "click", async () => {
@@ -851,4 +1027,7 @@ if (!invoke) {
   invoke("app_info")
     .then((info) => log("AutoAim Review", info))
     .catch((error) => log(error?.message || String(error)));
+  setTimeout(() => {
+    checkForUpdates({ manual: false });
+  }, AUTO_UPDATE_CHECK_DELAY_MS);
 }

@@ -82,6 +82,9 @@ struct WriteEventsResult {
 struct UpdateCommandResult {
     success: bool,
     output: String,
+    update_available: Option<bool>,
+    installed_version: Option<String>,
+    latest_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -750,6 +753,9 @@ fn apply_update(
             output:
                 "Updater started. AutoAim Review will close so the update can replace app files."
                     .to_string(),
+            update_available: None,
+            installed_version: None,
+            latest_version: None,
         })
     }
 
@@ -801,10 +807,40 @@ fn run_update_command(
         format!("{stdout}\n{stderr}")
     };
 
+    let (update_available, installed_version, latest_version) = parse_update_check_output(&text);
     Ok(UpdateCommandResult {
         success: output.status.success(),
         output: text,
+        update_available,
+        installed_version,
+        latest_version,
     })
+}
+
+fn parse_update_check_output(text: &str) -> (Option<bool>, Option<String>, Option<String>) {
+    let mut installed_version = None;
+    let mut latest_version = None;
+    let mut update_available = None;
+
+    for line in text.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("Installed version:") {
+            installed_version = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Latest version:") {
+            latest_version = Some(value.trim().to_string());
+        } else if line.contains("Incremental update available") {
+            update_available = Some(true);
+        } else if line.contains("Already up to date") {
+            update_available = Some(false);
+        }
+    }
+
+    if update_available.is_none() {
+        if let (Some(installed), Some(latest)) = (&installed_version, &latest_version) {
+            update_available = Some(installed != latest);
+        }
+    }
+
+    (update_available, installed_version, latest_version)
 }
 
 fn find_update_script(install_dir: Option<&str>) -> Result<PathBuf, String> {

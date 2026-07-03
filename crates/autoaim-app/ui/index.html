@@ -15,6 +15,7 @@
           <p data-i18n="subtitle">Select a screen and run visual monitoring. Review-only, no input control.</p>
         </div>
         <div class="title-actions">
+          <button id="updateStatusBtn" class="quiet-action" data-i18n="updateStatusIdle">Update</button>
           <span class="status-pill" id="statusPill" data-i18n="statusReady">Ready</span>
           <label class="select-label" for="languageSelect" data-i18n="languageLabel">Language</label>
           <select id="languageSelect" aria-label="Language">
@@ -123,6 +124,23 @@
           </section>
         </aside>
       </main>
+    </div>
+
+    <div id="updateDialog" class="dialog-backdrop" hidden>
+      <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="updateDialogTitle">
+        <div>
+          <p class="section-kicker" data-i18n="updateDialogKicker">Update</p>
+          <h2 id="updateDialogTitle" data-i18n="updateDialogTitle">A new version is available</h2>
+          <p id="updateDialogText" data-i18n="updateDialogText">
+            AutoAim Review can restart now and apply the update.
+          </p>
+        </div>
+        <div id="updateVersionText" class="update-version"></div>
+        <div class="dialog-actions">
+          <button id="dismissUpdateBtn" data-i18n="updateLater">Later</button>
+          <button id="restartUpdateBtn" class="primary" data-i18n="restartToUpdate">Restart and update</button>
+        </div>
+      </section>
     </div>
 
     <script src="./main.js"></script>
