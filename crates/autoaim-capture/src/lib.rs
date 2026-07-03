@@ -200,6 +200,9 @@ fn capture_screen_region_rgba_desktop_duplication(
     use std::{io::ErrorKind, thread, time::Duration};
 
     let matching = Display::all()
+        .map_err(|_| {
+            CaptureError::BackendUnavailable("desktop duplication display enumeration failed")
+        })?
         .into_iter()
         .filter(|display| {
             display.width() as u32 == screen_size[0] && display.height() as u32 == screen_size[1]
@@ -220,17 +223,17 @@ fn capture_screen_region_rgba_desktop_duplication(
         }
     };
 
-    let mut capturer = Capturer::new(&display)
-        .map_err(|_| CaptureError::BackendUnavailable("desktop duplication init failed"))?;
     let src_width = display.width() as usize;
     let src_height = display.height() as usize;
+    let mut capturer = Capturer::new(display)
+        .map_err(|_| CaptureError::BackendUnavailable("desktop duplication init failed"))?;
 
     for _ in 0..8 {
-        match capturer.frame(50) {
+        match capturer.frame() {
             Ok(frame) => {
                 let pitch = frame.len() / src_height.max(1);
                 return Ok(scale_bgra_to_rgba(
-                    frame,
+                    &frame,
                     src_width,
                     src_height,
                     pitch,
