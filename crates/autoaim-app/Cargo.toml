@@ -25,5 +25,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-build.workspace = true
 
 [features]
-default = ["directml"]
+default = ["directml", "cuda", "tensorrt"]
 directml = ["autoaim-infer/directml"]
+cuda = ["autoaim-infer/cuda"]
+tensorrt = ["autoaim-infer/tensorrt"]

@@ -8,10 +8,10 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(all(feature = "directml", feature = "movenet"))]
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 use std::sync::Mutex;
 
-#[cfg(all(feature = "directml", feature = "movenet"))]
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 use ort::{ep, session::Session, value::Tensor as OrtTensor};
 
 #[cfg(feature = "movenet")]
@@ -307,11 +307,13 @@ fn load_pose_model(config: &InferenceConfig) -> Result<Option<Box<dyn PoseModel>
 
     #[cfg(feature = "movenet")]
     {
-        #[cfg(feature = "directml")]
-        if config.provider == NativeInferenceProvider::DirectMl
-            && has_extension(&model_path, "onnx")
-        {
-            let model = OrtMoveNetModel::from_path(&model_path, config.movenet_input_size())?;
+        #[cfg(feature = "ort-backend")]
+        if is_ort_provider(config.provider) && has_extension(&model_path, "onnx") {
+            let model = OrtMoveNetModel::from_path(
+                &model_path,
+                config.provider,
+                config.movenet_input_size(),
+            )?;
             return Ok(Some(Box::new(model)));
         }
 
@@ -328,12 +330,22 @@ fn load_pose_model(config: &InferenceConfig) -> Result<Option<Box<dyn PoseModel>
     }
 }
 
-#[cfg(feature = "directml")]
+#[cfg(feature = "ort-backend")]
 fn has_extension(path: &Path, extension: &str) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
         .map(|value| value.eq_ignore_ascii_case(extension))
         .unwrap_or(false)
+}
+
+#[cfg(feature = "ort-backend")]
+fn is_ort_provider(provider: NativeInferenceProvider) -> bool {
+    matches!(
+        provider,
+        NativeInferenceProvider::DirectMl
+            | NativeInferenceProvider::Cuda
+            | NativeInferenceProvider::TensorRt
+    )
 }
 
 #[cfg(feature = "movenet")]
@@ -469,13 +481,14 @@ impl PoseModel for TractMoveNetModel {
     }
 }
 
-#[cfg(all(feature = "directml", feature = "movenet"))]
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 struct OrtMoveNetModel {
     session: Mutex<Session>,
     input_size: u32,
+    provider: NativeInferenceProvider,
 }
 
-#[cfg(all(feature = "directml", feature = "movenet"))]
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 impl fmt::Debug for OrtMoveNetModel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -486,12 +499,17 @@ impl fmt::Debug for OrtMoveNetModel {
     }
 }
 
-#[cfg(all(feature = "directml", feature = "movenet"))]
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 impl OrtMoveNetModel {
-    fn from_path(path: impl AsRef<Path>, input_size: u32) -> Result<Self, InferenceError> {
+    fn from_path(
+        path: impl AsRef<Path>,
+        provider: NativeInferenceProvider,
+        input_size: u32,
+    ) -> Result<Self, InferenceError> {
+        let execution_provider = ort_execution_provider(provider, path.as_ref());
         let session = Session::builder()
             .map_err(|error| InferenceError::ModelLoad(error.to_string()))?
-            .with_execution_providers([ep::DirectML::default().build()])
+            .with_execution_providers([execution_provider])
             .map_err(|error| InferenceError::ModelLoad(error.to_string()))?
             .commit_from_file(path.as_ref())
             .map_err(|error| InferenceError::ModelLoad(error.to_string()))?;
@@ -499,18 +517,24 @@ impl OrtMoveNetModel {
         Ok(Self {
             session: Mutex::new(session),
             input_size,
+            provider,
         })
     }
 }
 
-#[cfg(all(feature = "directml", feature = "movenet"))]
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 impl PoseModel for OrtMoveNetModel {
     fn input_size(&self) -> u32 {
         self.input_size
     }
 
     fn runtime_name(&self) -> &'static str {
-        "onnxruntime DirectML"
+        match self.provider {
+            NativeInferenceProvider::DirectMl => "onnxruntime DirectML",
+            NativeInferenceProvider::Cuda => "onnxruntime CUDA",
+            NativeInferenceProvider::TensorRt => "onnxruntime TensorRT",
+            NativeInferenceProvider::Cpu => "onnxruntime CPU",
+        }
     }
 
     fn infer(&self, input: &MoveNetInput) -> Result<MoveNetRawOutput, InferenceError> {
@@ -540,6 +564,32 @@ impl PoseModel for OrtMoveNetModel {
         Ok(MoveNetRawOutput {
             values: values.to_vec(),
         })
+    }
+}
+
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
+fn ort_execution_provider(
+    provider: NativeInferenceProvider,
+    model_path: &Path,
+) -> ort::execution_providers::ExecutionProviderDispatch {
+    match provider {
+        NativeInferenceProvider::DirectMl => ep::DirectML::default().build(),
+        NativeInferenceProvider::Cuda => ep::CUDA::default().with_device_id(0).build(),
+        NativeInferenceProvider::TensorRt => {
+            let cache_dir = model_path
+                .parent()
+                .map(|parent| parent.join("trt_cache"))
+                .unwrap_or_else(|| PathBuf::from("trt_cache"));
+            ep::TensorRT::default()
+                .with_device_id(0)
+                .with_fp16(true)
+                .with_engine_cache(true)
+                .with_engine_cache_path(cache_dir.to_string_lossy())
+                .with_timing_cache(true)
+                .with_timing_cache_path(cache_dir.to_string_lossy())
+                .build()
+        }
+        NativeInferenceProvider::Cpu => unreachable!("CPU provider does not use ONNX Runtime EPs"),
     }
 }
 
@@ -1018,6 +1068,7 @@ mod tests {
             screen_origin: [100, 50],
             screen_size: [960, 720],
             frame_size: [width, height],
+            capture_backend: autoaim_capture::CaptureBackend::Gdi,
             rgba,
             cursor: [400.0, 300.0],
             cursor_on_screen: true,

@@ -53,6 +53,8 @@
             <button id="refreshScreensBtn" class="secondary" data-i18n="refreshScreens">Refresh screens</button>
             <button id="startLiveBtn" class="primary" data-i18n="startLive">Start now</button>
             <button id="stopLiveBtn" data-i18n="stopLive">Stop</button>
+            <button id="showOverlayBtn" class="secondary" data-i18n="showOverlay">Show overlay</button>
+            <button id="hideOverlayBtn" data-i18n="hideOverlay">Hide overlay</button>
           </div>
 
           <div class="monitor-canvas-wrap">
@@ -106,7 +108,7 @@
           <div class="field-group">
             <label for="modelPath" data-i18n="modelPath">Model path</label>
             <div class="path-row">
-              <input id="modelPath" spellcheck="false" placeholder="Bundled: models/movenet_lightning.tflite" />
+              <input id="modelPath" spellcheck="false" placeholder="Bundled: GPU=models/movenet_lightning.onnx, CPU=models/movenet_lightning.tflite" />
               <button id="showRuntimeBtn" class="secondary" data-i18n="showRuntime">Show config</button>
             </div>
           </div>
@@ -210,7 +212,10 @@
               <p class="section-kicker" data-i18n="consoleKicker">Output</p>
               <h2 data-i18n="consoleTitle">Command result</h2>
             </div>
-            <button id="clearLog" class="ghost" data-i18n="clear">Clear</button>
+            <div class="button-row compact-row">
+              <button id="copyDiagnosticsBtn" class="ghost" data-i18n="copyDiagnostics">Copy diagnostics</button>
+              <button id="clearLog" class="ghost" data-i18n="clear">Clear</button>
+            </div>
           </div>
           <pre id="logOutput"></pre>
         </section>

@@ -1,4 +1,4 @@
-use autoaim_capture::CapturedFrame;
+use autoaim_capture::{CaptureBackend, CapturedFrame};
 use autoaim_infer::{
     decode_movenet_output, detect_movenet_poses, prepare_movenet_input, InferenceError,
     MoveNetInput, MoveNetRawOutput, PoseModel, MOVENET_KEYPOINT_COUNT,
@@ -43,6 +43,7 @@ fn synthetic_frame() -> CapturedFrame {
         screen_origin: [100, 50],
         screen_size: [640, 480],
         frame_size: [width, height],
+        capture_backend: CaptureBackend::Gdi,
         rgba,
         cursor: [300.0, 220.0],
         cursor_on_screen: true,

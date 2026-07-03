@@ -18,7 +18,9 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",
+    "cuda",
     "directml",
+    "tensorrt",
     "tls-native",
     "api-24",
 ], optional = true }
@@ -28,4 +30,7 @@ tract-tflite = { version = "0.23", optional = true }
 [features]
 default = ["movenet"]
 movenet = ["dep:tract-onnx", "dep:tract-tflite"]
-directml = ["movenet", "dep:ort"]
+ort-backend = ["movenet", "dep:ort"]
+directml = ["ort-backend"]
+cuda = ["ort-backend"]
+tensorrt = ["ort-backend"]

@@ -81,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           cargo test -p autoaim-core -p autoaim-ipc -p autoaim-runtime -p autoaim-capture -p autoaim-infer -p autoaim-cli
-          cargo check -p autoaim-infer --features directml
+            cargo check -p autoaim-infer --features directml,cuda,tensorrt
 
       - name: Run Rust CLI E2E
         shell: pwsh

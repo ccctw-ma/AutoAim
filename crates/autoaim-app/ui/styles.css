@@ -203,6 +203,17 @@ select:focus {
   margin-bottom: 16px;
 }
 
+.button-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.compact-row {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .status-pill {
   padding: 8px 12px;
   color: #c7f9ff;

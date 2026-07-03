@@ -6,7 +6,7 @@
 use autoaim_capture::{capture_screen_frame, CapturedFramePreview};
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
-    Point, TargetScorer, ValidationDiagnostic,
+    ObjectTracker, Point, TargetScorer, ValidationDiagnostic,
 };
 use autoaim_infer::{
     InferenceConfig as NativeInferenceConfig, NativeInferenceProvider, NativePersonDetector,
@@ -18,13 +18,17 @@ use autoaim_ipc::{
 use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
+use tauri::Manager;
 
 const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
+const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 
 #[derive(Debug, Serialize)]
 struct AppInfo {
@@ -88,7 +92,7 @@ struct ScreenInfo {
     primary: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct LivePersonPosition {
     object_index: usize,
     class_name: String,
@@ -101,7 +105,7 @@ struct LivePersonPosition {
     dy: f32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct LiveMonitorSnapshot {
     screen_id: String,
     frame: CapturedFramePreview,
@@ -112,6 +116,39 @@ struct LiveMonitorSnapshot {
     capture_status: String,
     provider: String,
     review_only: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct OverlaySnapshot {
+    screen_id: String,
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    cursor: Point,
+    cursor_on_screen: bool,
+    people: Vec<LivePersonPosition>,
+}
+
+#[derive(Debug, Serialize)]
+struct DiagnosticContext {
+    app_name: &'static str,
+    app_version: &'static str,
+    requested_provider: String,
+    resolved_model_path: Option<String>,
+    confidence_threshold: f32,
+    selected_screen_id: Option<String>,
+    screens: Vec<ScreenInfo>,
+    overlay_enabled: bool,
+    overlay_screen_id: Option<String>,
+}
+
+#[derive(Default)]
+struct LiveTrackingState {
+    trackers: Mutex<HashMap<String, ObjectTracker>>,
+}
+
+#[derive(Default)]
+struct OverlayState {
+    active_screen_id: Mutex<Option<String>>,
 }
 
 #[tauri::command]
@@ -145,7 +182,7 @@ fn inference_runtime_config(
 
     Ok(InferenceRuntimeConfig::new(
         provider,
-        resolve_model_path(model_path, provider == InferenceProvider::DirectMl),
+        resolve_model_path(model_path, provider_prefers_onnx(provider)),
         device_id,
         confidence_threshold.unwrap_or(0.25),
     ))
@@ -158,6 +195,9 @@ fn list_screens(window: tauri::Window) -> Result<Vec<ScreenInfo>, String> {
 
 #[tauri::command]
 fn live_monitor_snapshot(
+    app: tauri::AppHandle,
+    tracking_state: tauri::State<LiveTrackingState>,
+    overlay_state: tauri::State<OverlayState>,
     window: tauri::Window,
     screen_id: String,
     model_path: Option<String>,
@@ -176,10 +216,29 @@ fn live_monitor_snapshot(
     let config = native_inference_config(provider, model_path, confidence_threshold)?;
     let detector = NativePersonDetector::from_config(config).map_err(|error| error.to_string())?;
     let inference = detector.detect(&frame).map_err(|error| error.to_string())?;
-    let people = live_positions_from_objects(&inference.objects, &inference.poses, frame.cursor);
+    let mut tracked_objects = inference.objects.clone();
+    apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)
+        .map_err(|error| error.to_string())?;
+    let people = live_positions_from_objects(&tracked_objects, &inference.poses, frame.cursor);
     let capture_status = format!(
-        "native Windows API capture: {}x{} preview from {}x{} screen",
-        frame.frame_size[0], frame.frame_size[1], frame.screen_size[0], frame.screen_size[1]
+        "native Windows capture [{}]: {}x{} preview from {}x{} screen",
+        frame.capture_backend.as_str(),
+        frame.frame_size[0],
+        frame.frame_size[1],
+        frame.screen_size[0],
+        frame.screen_size[1]
+    );
+    emit_overlay_snapshot(
+        &app,
+        &overlay_state,
+        OverlaySnapshot {
+            screen_id: screen.id.clone(),
+            screen_origin: frame.screen_origin,
+            screen_size: frame.screen_size,
+            cursor: frame.cursor,
+            cursor_on_screen: frame.cursor_on_screen,
+            people: people.clone(),
+        },
     );
 
     Ok(LiveMonitorSnapshot {
@@ -206,9 +265,25 @@ fn native_inference_config(
 
     Ok(NativeInferenceConfig::new(
         provider,
-        resolve_model_path(model_path, provider == NativeInferenceProvider::DirectMl),
+        resolve_model_path(model_path, native_provider_prefers_onnx(provider)),
         confidence_threshold.unwrap_or(0.25),
     ))
+}
+
+fn provider_prefers_onnx(provider: InferenceProvider) -> bool {
+    matches!(
+        provider,
+        InferenceProvider::DirectMl | InferenceProvider::Cuda | InferenceProvider::TensorRt
+    )
+}
+
+fn native_provider_prefers_onnx(provider: NativeInferenceProvider) -> bool {
+    matches!(
+        provider,
+        NativeInferenceProvider::DirectMl
+            | NativeInferenceProvider::Cuda
+            | NativeInferenceProvider::TensorRt
+    )
 }
 
 fn resolve_model_path(model_path: Option<String>, prefer_onnx: bool) -> Option<String> {
@@ -287,6 +362,150 @@ fn live_positions_from_objects(
             }
         })
         .collect()
+}
+
+fn apply_live_tracking(
+    tracking_state: &LiveTrackingState,
+    screen_id: &str,
+    objects: &mut [DetectionObject],
+) -> Result<(), String> {
+    let mut trackers = tracking_state
+        .trackers
+        .lock()
+        .map_err(|_| "live tracker state lock poisoned".to_string())?;
+    let tracker = trackers
+        .entry(screen_id.to_string())
+        .or_insert_with(ObjectTracker::default);
+    tracker.assign(objects);
+    Ok(())
+}
+
+fn emit_overlay_snapshot(
+    app: &tauri::AppHandle,
+    overlay_state: &OverlayState,
+    snapshot: OverlaySnapshot,
+) {
+    let active_screen_id = overlay_state
+        .active_screen_id
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    if active_screen_id.as_deref() != Some(snapshot.screen_id.as_str()) {
+        return;
+    }
+
+    if let Some(window) = app.get_window(OVERLAY_WINDOW_LABEL) {
+        let _ = window.emit("overlay_snapshot", &snapshot);
+    }
+}
+
+#[tauri::command]
+fn diagnostics_context(
+    overlay_state: tauri::State<OverlayState>,
+    window: tauri::Window,
+    selected_screen_id: Option<String>,
+    provider: Option<String>,
+    model_path: Option<String>,
+    confidence_threshold: Option<f32>,
+) -> Result<DiagnosticContext, String> {
+    let screens = platform_list_screens(&window)?;
+    let provider_name = provider.unwrap_or_else(|| "directml".to_string());
+    let provider = NativeInferenceProvider::from_name(&provider_name)
+        .ok_or_else(|| format!("unsupported inference provider: {provider_name}"))?;
+    let resolved_model_path =
+        resolve_model_path(model_path, native_provider_prefers_onnx(provider));
+    let overlay_screen_id = overlay_state
+        .active_screen_id
+        .lock()
+        .map_err(|_| "overlay state lock poisoned".to_string())?
+        .clone();
+
+    Ok(DiagnosticContext {
+        app_name: "AutoAim Review",
+        app_version: env!("CARGO_PKG_VERSION"),
+        requested_provider: provider.as_str().to_string(),
+        resolved_model_path,
+        confidence_threshold: confidence_threshold.unwrap_or(0.25),
+        selected_screen_id,
+        screens,
+        overlay_enabled: overlay_screen_id.is_some(),
+        overlay_screen_id,
+    })
+}
+
+#[tauri::command]
+fn open_overlay_window(
+    app: tauri::AppHandle,
+    overlay_state: tauri::State<OverlayState>,
+    window: tauri::Window,
+    screen_id: String,
+) -> Result<(), String> {
+    let screens = platform_list_screens(&window)?;
+    let screen = screens
+        .iter()
+        .find(|item| item.id == screen_id)
+        .ok_or_else(|| format!("screen not found: {screen_id}"))?;
+
+    let overlay = if let Some(existing) = app.get_window(OVERLAY_WINDOW_LABEL) {
+        existing
+    } else {
+        tauri::WindowBuilder::new(
+            &app,
+            OVERLAY_WINDOW_LABEL,
+            tauri::WindowUrl::App("overlay.html".into()),
+        )
+        .title("AutoAim Overlay")
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focused(false)
+        .visible(false)
+        .build()
+        .map_err(|error| format!("failed to create overlay window: {error}"))?
+    };
+
+    sync_overlay_window(&overlay, screen)?;
+    let _ = overlay.set_ignore_cursor_events(true);
+    overlay
+        .show()
+        .map_err(|error| format!("failed to show overlay window: {error}"))?;
+    *overlay_state
+        .active_screen_id
+        .lock()
+        .map_err(|_| "overlay state lock poisoned".to_string())? = Some(screen.id.clone());
+    Ok(())
+}
+
+#[tauri::command]
+fn close_overlay_window(
+    app: tauri::AppHandle,
+    overlay_state: tauri::State<OverlayState>,
+) -> Result<(), String> {
+    if let Some(window) = app.get_window(OVERLAY_WINDOW_LABEL) {
+        window
+            .hide()
+            .map_err(|error| format!("failed to hide overlay window: {error}"))?;
+    }
+    *overlay_state
+        .active_screen_id
+        .lock()
+        .map_err(|_| "overlay state lock poisoned".to_string())? = None;
+    Ok(())
+}
+
+fn sync_overlay_window(window: &tauri::Window, screen: &ScreenInfo) -> Result<(), String> {
+    window
+        .set_position(tauri::PhysicalPosition::new(
+            screen.origin[0],
+            screen.origin[1],
+        ))
+        .map_err(|error| format!("failed to set overlay position: {error}"))?;
+    window
+        .set_size(tauri::PhysicalSize::new(screen.size[0], screen.size[1]))
+        .map_err(|error| format!("failed to set overlay size: {error}"))?;
+    Ok(())
 }
 
 fn platform_list_screens(window: &tauri::Window) -> Result<Vec<ScreenInfo>, String> {
@@ -590,11 +809,16 @@ fn escape_powershell_path(path: &Path) -> String {
 
 fn main() {
     tauri::Builder::default()
+        .manage(LiveTrackingState::default())
+        .manage(OverlayState::default())
         .invoke_handler(tauri::generate_handler![
             app_info,
             inference_runtime_config,
             list_screens,
             live_monitor_snapshot,
+            diagnostics_context,
+            open_overlay_window,
+            close_overlay_window,
             validate_dataset,
             evaluate_dataset,
             preview_events,

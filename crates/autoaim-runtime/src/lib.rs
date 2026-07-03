@@ -1,4 +1,4 @@
-use autoaim_core::{choose_target, AutoAimError, FrameRecord, Point, TargetScorer};
+use autoaim_core::{choose_target, AutoAimError, FrameRecord, ObjectTracker, Point, TargetScorer};
 use autoaim_ipc::{encode_json_line, AssistSuggestionEvent, InferenceResult};
 use std::{
     fs::{File, OpenOptions},
@@ -25,6 +25,7 @@ impl Default for RuntimeConfig {
 pub struct ReviewPipeline {
     config: RuntimeConfig,
     previous_track_id: Option<u64>,
+    tracker: ObjectTracker,
 }
 
 impl ReviewPipeline {
@@ -32,6 +33,7 @@ impl ReviewPipeline {
         Self {
             config,
             previous_track_id: None,
+            tracker: ObjectTracker::default(),
         }
     }
 
@@ -51,16 +53,17 @@ impl ReviewPipeline {
         frame: &FrameRecord,
         latency_ms: f32,
     ) -> InferenceResult {
-        let suggestion = choose_target(frame, self.config.scorer, self.previous_track_id);
+        let tracked_frame = self.tracked_frame(frame);
+        let suggestion = choose_target(&tracked_frame, self.config.scorer, self.previous_track_id);
         self.previous_track_id = suggestion
             .target_index
-            .and_then(|index| frame.objects.get(index))
+            .and_then(|index| tracked_frame.objects.get(index))
             .and_then(|object| object.track_id);
 
         InferenceResult::new(
-            frame.frame_id,
+            tracked_frame.frame_id,
             latency_ms,
-            frame.objects.clone(),
+            tracked_frame.objects,
             suggestion,
         )
     }
@@ -70,15 +73,17 @@ impl ReviewPipeline {
         frame: &FrameRecord,
         latency_ms: f32,
     ) -> (InferenceResult, Option<AssistSuggestionEvent>) {
-        let suggestion = choose_target(frame, self.config.scorer, self.previous_track_id);
+        let tracked_frame = self.tracked_frame(frame);
+        let suggestion = choose_target(&tracked_frame, self.config.scorer, self.previous_track_id);
         self.previous_track_id = suggestion
             .target_index
-            .and_then(|index| frame.objects.get(index))
+            .and_then(|index| tracked_frame.objects.get(index))
             .and_then(|object| object.track_id);
 
-        let assist_event = if frame.input.mouse_down && suggestion.suggested_point.is_some() {
+        let assist_event = if tracked_frame.input.mouse_down && suggestion.suggested_point.is_some()
+        {
             Some(AssistSuggestionEvent::left_mouse_review(
-                frame.frame_id,
+                tracked_frame.frame_id,
                 suggestion,
             ))
         } else {
@@ -86,9 +91,9 @@ impl ReviewPipeline {
         };
 
         let result = InferenceResult::new(
-            frame.frame_id,
+            tracked_frame.frame_id,
             latency_ms,
-            frame.objects.clone(),
+            tracked_frame.objects,
             suggestion,
         );
 
@@ -100,6 +105,12 @@ impl ReviewPipeline {
             .iter()
             .map(|record| self.process_frame(record))
             .collect()
+    }
+
+    fn tracked_frame(&mut self, frame: &FrameRecord) -> FrameRecord {
+        let mut tracked = frame.clone();
+        self.tracker.assign(&mut tracked.objects);
+        tracked
     }
 }
 

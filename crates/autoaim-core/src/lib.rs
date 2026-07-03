@@ -174,6 +174,126 @@ pub struct TargetScorer {
     pub max_distance_px: f32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TrackerConfig {
+    pub min_iou: f32,
+    pub max_center_distance_px: f32,
+    pub max_missed_frames: u64,
+}
+
+impl Default for TrackerConfig {
+    fn default() -> Self {
+        Self {
+            min_iou: 0.05,
+            max_center_distance_px: 180.0,
+            max_missed_frames: 8,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TrackState {
+    id: u64,
+    class_name: String,
+    bbox: BBox,
+    aim_point: Point,
+    last_seen_frame: u64,
+}
+
+#[derive(Debug)]
+pub struct ObjectTracker {
+    config: TrackerConfig,
+    next_track_id: u64,
+    frame_index: u64,
+    tracks: Vec<TrackState>,
+}
+
+impl Default for ObjectTracker {
+    fn default() -> Self {
+        Self::new(TrackerConfig::default())
+    }
+}
+
+impl ObjectTracker {
+    pub fn new(config: TrackerConfig) -> Self {
+        Self {
+            config,
+            next_track_id: 1,
+            frame_index: 0,
+            tracks: Vec::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.next_track_id = 1;
+        self.frame_index = 0;
+        self.tracks.clear();
+    }
+
+    pub fn assign(&mut self, objects: &mut [DetectionObject]) {
+        self.frame_index += 1;
+        self.tracks.retain(|track| {
+            self.frame_index.saturating_sub(track.last_seen_frame) <= self.config.max_missed_frames
+        });
+
+        let mut claimed_tracks = vec![false; self.tracks.len()];
+        for object in objects.iter_mut() {
+            if object.class_name != "person" {
+                continue;
+            }
+
+            let aim_point = object.aim_point();
+            let mut best_track = None;
+            let mut best_score = f32::NEG_INFINITY;
+
+            for (index, track) in self.tracks.iter().enumerate() {
+                if claimed_tracks[index] || track.class_name != object.class_name {
+                    continue;
+                }
+
+                let iou = bbox_iou(track.bbox, object.bbox);
+                let center_distance = point_distance(track.aim_point, aim_point);
+                let allowed_distance = self
+                    .config
+                    .max_center_distance_px
+                    .max(object.bbox[2].max(object.bbox[3]) * 0.65);
+
+                if iou < self.config.min_iou && center_distance > allowed_distance {
+                    continue;
+                }
+
+                let distance_score = 1.0 - (center_distance / allowed_distance).min(1.0);
+                let score = iou * 0.65 + distance_score * 0.35;
+                if score > best_score {
+                    best_score = score;
+                    best_track = Some(index);
+                }
+            }
+
+            if let Some(track_index) = best_track {
+                let track = &mut self.tracks[track_index];
+                track.bbox = object.bbox;
+                track.aim_point = aim_point;
+                track.last_seen_frame = self.frame_index;
+                object.track_id = Some(track.id);
+                claimed_tracks[track_index] = true;
+            } else {
+                let track_id = self.next_track_id;
+                self.next_track_id += 1;
+                self.tracks.push(TrackState {
+                    id: track_id,
+                    class_name: object.class_name.clone(),
+                    bbox: object.bbox,
+                    aim_point,
+                    last_seen_frame: self.frame_index,
+                });
+                claimed_tracks.push(true);
+                object.track_id = Some(track_id);
+            }
+        }
+    }
+}
+
 impl Default for TargetScorer {
     fn default() -> Self {
         Self {
@@ -211,6 +331,39 @@ impl TargetScorer {
 pub fn bbox_center(bbox: BBox) -> Point {
     let [x, y, w, h] = bbox;
     [x + w / 2.0, y + h / 2.0]
+}
+
+pub fn bbox_iou(left: BBox, right: BBox) -> f32 {
+    let left_x1 = left[0];
+    let left_y1 = left[1];
+    let left_x2 = left[0] + left[2];
+    let left_y2 = left[1] + left[3];
+    let right_x1 = right[0];
+    let right_y1 = right[1];
+    let right_x2 = right[0] + right[2];
+    let right_y2 = right[1] + right[3];
+
+    let intersection_w = (left_x2.min(right_x2) - left_x1.max(right_x1)).max(0.0);
+    let intersection_h = (left_y2.min(right_y2) - left_y1.max(right_y1)).max(0.0);
+    let intersection = intersection_w * intersection_h;
+    if intersection <= 0.0 {
+        return 0.0;
+    }
+
+    let left_area = (left[2].max(0.0)) * (left[3].max(0.0));
+    let right_area = (right[2].max(0.0)) * (right[3].max(0.0));
+    let union = left_area + right_area - intersection;
+    if union <= 0.0 {
+        return 0.0;
+    }
+
+    intersection / union
+}
+
+pub fn point_distance(left: Point, right: Point) -> f32 {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+    (dx * dx + dy * dy).sqrt()
 }
 
 pub fn choose_target(
@@ -463,5 +616,55 @@ mod tests {
         let object = DetectionObject::person([100.0, 100.0, 100.0, 300.0]);
 
         assert_eq!(object.aim_point(), [150.0, 154.0]);
+    }
+
+    #[test]
+    fn object_tracker_reuses_track_id_for_nearby_person() {
+        let mut tracker = ObjectTracker::default();
+        let mut frame_one = vec![DetectionObject {
+            class_name: "person".to_string(),
+            bbox: [100.0, 100.0, 80.0, 220.0],
+            head_bbox: None,
+            head_point: Some([140.0, 135.0]),
+            confidence: 0.9,
+            track_id: None,
+        }];
+        tracker.assign(&mut frame_one);
+
+        let mut frame_two = vec![DetectionObject {
+            class_name: "person".to_string(),
+            bbox: [106.0, 102.0, 82.0, 218.0],
+            head_bbox: None,
+            head_point: Some([145.0, 136.0]),
+            confidence: 0.88,
+            track_id: None,
+        }];
+        tracker.assign(&mut frame_two);
+
+        assert_eq!(frame_one[0].track_id, Some(1));
+        assert_eq!(frame_two[0].track_id, Some(1));
+    }
+
+    #[test]
+    fn object_tracker_assigns_new_track_id_to_far_person() {
+        let mut tracker = ObjectTracker::default();
+        let mut frame_one = vec![DetectionObject::person([100.0, 100.0, 80.0, 220.0])];
+        tracker.assign(&mut frame_one);
+
+        let mut frame_two = vec![DetectionObject::person([500.0, 200.0, 80.0, 220.0])];
+        tracker.assign(&mut frame_two);
+
+        assert_eq!(frame_one[0].track_id, Some(1));
+        assert_eq!(frame_two[0].track_id, Some(2));
+    }
+
+    #[test]
+    fn bbox_iou_and_point_distance_cover_basic_geometry() {
+        assert!(bbox_iou([0.0, 0.0, 100.0, 100.0], [50.0, 50.0, 100.0, 100.0]) > 0.1);
+        assert_eq!(
+            bbox_iou([0.0, 0.0, 10.0, 10.0], [20.0, 20.0, 5.0, 5.0]),
+            0.0
+        );
+        assert_eq!(point_distance([0.0, 0.0], [3.0, 4.0]), 5.0);
     }
 }

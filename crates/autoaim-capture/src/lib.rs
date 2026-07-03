@@ -8,11 +8,29 @@ use std::{
 
 pub type Point = [f32; 2];
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub enum CaptureBackend {
+    #[serde(rename = "gdi")]
+    Gdi,
+    #[serde(rename = "desktop_duplication")]
+    DesktopDuplication,
+}
+
+impl CaptureBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gdi => "gdi",
+            Self::DesktopDuplication => "desktop_duplication",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapturedFrame {
     pub screen_origin: [i32; 2],
     pub screen_size: [u32; 2],
     pub frame_size: [u32; 2],
+    pub capture_backend: CaptureBackend,
     pub rgba: Vec<u8>,
     pub cursor: Point,
     pub cursor_on_screen: bool,
@@ -30,6 +48,7 @@ pub struct CapturedFramePreview {
     pub screen_origin: [i32; 2],
     pub screen_size: [u32; 2],
     pub frame_size: [u32; 2],
+    pub capture_backend: CaptureBackend,
     pub rgba_base64: String,
     pub cursor: Point,
     pub cursor_on_screen: bool,
@@ -42,6 +61,7 @@ impl From<&CapturedFrame> for CapturedFramePreview {
             screen_origin: frame.screen_origin,
             screen_size: frame.screen_size,
             frame_size: frame.frame_size,
+            capture_backend: frame.capture_backend,
             rgba_base64: frame.rgba_base64(),
             cursor: frame.cursor,
             cursor_on_screen: frame.cursor_on_screen,
@@ -54,6 +74,7 @@ impl From<&CapturedFrame> for CapturedFramePreview {
 pub enum CaptureError {
     InvalidScreenSize([u32; 2]),
     NativeCallFailed(&'static str),
+    BackendUnavailable(&'static str),
     UnsupportedPlatform(&'static str),
 }
 
@@ -64,6 +85,7 @@ impl fmt::Display for CaptureError {
                 write!(formatter, "invalid screen size: {}x{}", size[0], size[1])
             }
             CaptureError::NativeCallFailed(call) => write!(formatter, "{call} failed"),
+            CaptureError::BackendUnavailable(message) => formatter.write_str(message),
             CaptureError::UnsupportedPlatform(message) => formatter.write_str(message),
         }
     }
@@ -79,12 +101,14 @@ pub fn capture_screen_frame(
     let frame_size = scaled_frame_size(screen_size, max_frame_size)?;
     let cursor = cursor_position()?;
     let cursor_on_screen = point_in_screen(cursor, screen_origin, screen_size);
-    let rgba = capture_screen_region_rgba(screen_origin, screen_size, frame_size)?;
+    let (rgba, capture_backend) =
+        capture_screen_region_rgba(screen_origin, screen_size, frame_size)?;
 
     Ok(CapturedFrame {
         screen_origin,
         screen_size,
         frame_size,
+        capture_backend,
         rgba,
         cursor,
         cursor_on_screen,
@@ -155,6 +179,117 @@ fn platform_cursor_position() -> Result<Point, CaptureError> {
 
 #[cfg(target_os = "windows")]
 fn capture_screen_region_rgba(
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+) -> Result<(Vec<u8>, CaptureBackend), CaptureError> {
+    if let Ok(rgba) = capture_screen_region_rgba_desktop_duplication(screen_size, frame_size) {
+        return Ok((rgba, CaptureBackend::DesktopDuplication));
+    }
+
+    capture_screen_region_rgba_gdi(screen_origin, screen_size, frame_size)
+        .map(|rgba| (rgba, CaptureBackend::Gdi))
+}
+
+#[cfg(target_os = "windows")]
+fn capture_screen_region_rgba_desktop_duplication(
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+) -> Result<Vec<u8>, CaptureError> {
+    use scrap::{Capturer, Display};
+    use std::{io::ErrorKind, thread, time::Duration};
+
+    let matching = Display::all()
+        .into_iter()
+        .filter(|display| {
+            display.width() as u32 == screen_size[0] && display.height() as u32 == screen_size[1]
+        })
+        .collect::<Vec<_>>();
+
+    let display = match matching.len() {
+        1 => matching.into_iter().next().expect("display should exist"),
+        0 => {
+            return Err(CaptureError::BackendUnavailable(
+                "desktop duplication display not found",
+            ));
+        }
+        _ => {
+            return Err(CaptureError::BackendUnavailable(
+                "desktop duplication display match is ambiguous",
+            ));
+        }
+    };
+
+    let mut capturer = Capturer::new(&display)
+        .map_err(|_| CaptureError::BackendUnavailable("desktop duplication init failed"))?;
+    let src_width = display.width() as usize;
+    let src_height = display.height() as usize;
+
+    for _ in 0..8 {
+        match capturer.frame(50) {
+            Ok(frame) => {
+                let pitch = frame.len() / src_height.max(1);
+                return Ok(scale_bgra_to_rgba(
+                    frame,
+                    src_width,
+                    src_height,
+                    pitch,
+                    frame_size[0] as usize,
+                    frame_size[1] as usize,
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(8));
+            }
+            Err(_) => {
+                return Err(CaptureError::BackendUnavailable(
+                    "desktop duplication failed to capture frame",
+                ));
+            }
+        }
+    }
+
+    Err(CaptureError::BackendUnavailable(
+        "desktop duplication timed out while waiting for a frame",
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn scale_bgra_to_rgba(
+    bgra: &[u8],
+    src_width: usize,
+    src_height: usize,
+    src_pitch: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> Vec<u8> {
+    let mut rgba = vec![0_u8; dst_width * dst_height * 4];
+    let scale_x = src_width as f32 / dst_width.max(1) as f32;
+    let scale_y = src_height as f32 / dst_height.max(1) as f32;
+
+    for dst_y in 0..dst_height {
+        let src_y = ((dst_y as f32 + 0.5) * scale_y)
+            .floor()
+            .clamp(0.0, src_height.saturating_sub(1) as f32) as usize;
+        let src_row = src_y * src_pitch;
+        for dst_x in 0..dst_width {
+            let src_x = ((dst_x as f32 + 0.5) * scale_x)
+                .floor()
+                .clamp(0.0, src_width.saturating_sub(1) as f32) as usize;
+            let src_index = src_row + src_x * 4;
+            let dst_index = (dst_y * dst_width + dst_x) * 4;
+            rgba[dst_index] = bgra[src_index + 2];
+            rgba[dst_index + 1] = bgra[src_index + 1];
+            rgba[dst_index + 2] = bgra[src_index];
+            rgba[dst_index + 3] = 255;
+        }
+    }
+
+    rgba
+}
+
+#[cfg(target_os = "windows")]
+fn capture_screen_region_rgba_gdi(
     screen_origin: [i32; 2],
     screen_size: [u32; 2],
     frame_size: [u32; 2],
@@ -297,7 +432,7 @@ fn capture_screen_region_rgba(
     _screen_origin: [i32; 2],
     _screen_size: [u32; 2],
     _frame_size: [u32; 2],
-) -> Result<Vec<u8>, CaptureError> {
+) -> Result<(Vec<u8>, CaptureBackend), CaptureError> {
     Err(CaptureError::UnsupportedPlatform(
         "native screen capture is available only on Windows",
     ))
@@ -324,5 +459,24 @@ mod tests {
         assert!(point_in_screen([150.0, 120.0], [100, 50], [800, 600]));
         assert!(!point_in_screen([99.0, 120.0], [100, 50], [800, 600]));
         assert!(!point_in_screen([900.0, 120.0], [100, 50], [800, 600]));
+    }
+
+    #[test]
+    fn captured_frame_preview_keeps_capture_backend() {
+        let frame = CapturedFrame {
+            screen_origin: [0, 0],
+            screen_size: [1920, 1080],
+            frame_size: [960, 540],
+            capture_backend: CaptureBackend::DesktopDuplication,
+            rgba: vec![0; 960 * 540 * 4],
+            cursor: [12.0, 24.0],
+            cursor_on_screen: true,
+            timestamp_millis: 123,
+        };
+
+        let preview = CapturedFramePreview::from(&frame);
+        assert_eq!(preview.capture_backend, CaptureBackend::DesktopDuplication);
+        assert_eq!(preview.frame_size, [960, 540]);
+        assert_eq!(preview.cursor, [12.0, 24.0]);
     }
 }

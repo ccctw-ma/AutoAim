@@ -14,6 +14,8 @@ const i18n = {
     refreshScreens: "Refresh screens",
     startLive: "Start now",
     stopLive: "Stop",
+    showOverlay: "Show overlay",
+    hideOverlay: "Hide overlay",
     liveStopped: "Stopped",
     liveRunning: "Running",
     liveStarting: "Starting live monitor...",
@@ -69,6 +71,7 @@ const i18n = {
     nextText: "Live mode uses native Windows screen capture, cursor polling, and the Rust inference boundary.",
     consoleKicker: "Output",
     consoleTitle: "Command result",
+    copyDiagnostics: "Copy diagnostics",
     clear: "Clear",
     validating: "Validating dataset...",
     validationOk: "Validation passed.",
@@ -105,6 +108,8 @@ const i18n = {
     refreshScreens: "刷新屏幕",
     startLive: "立即开始",
     stopLive: "停止",
+    showOverlay: "显示悬浮层",
+    hideOverlay: "隐藏悬浮层",
     liveStopped: "已停止",
     liveRunning: "运行中",
     liveStarting: "正在启动实时监控...",
@@ -160,6 +165,7 @@ const i18n = {
     nextText: "实时模式使用 Windows 原生屏幕采集、鼠标轮询和 Rust 推理边界。",
     consoleKicker: "输出",
     consoleTitle: "命令结果",
+    copyDiagnostics: "复制诊断",
     clear: "清空",
     validating: "正在校验数据集...",
     validationOk: "校验通过。",
@@ -193,6 +199,7 @@ const state = {
   detectedPeople: [],
   lastCursor: [0, 0],
   lastFrame: null,
+  lastSnapshotSummary: null,
   screens: [],
   selectedScreenId: null,
 };
@@ -206,6 +213,8 @@ const els = {
   refreshScreensBtn: $("refreshScreensBtn"),
   startLiveBtn: $("startLiveBtn"),
   stopLiveBtn: $("stopLiveBtn"),
+  showOverlayBtn: $("showOverlayBtn"),
+  hideOverlayBtn: $("hideOverlayBtn"),
   monitorCanvas: $("monitorCanvas"),
   liveState: $("liveState"),
   cursorReadout: $("cursorReadout"),
@@ -228,6 +237,7 @@ const els = {
   showRuntimeBtn: $("showRuntimeBtn"),
   checkUpdatesBtn: $("checkUpdatesBtn"),
   applyUpdateBtn: $("applyUpdateBtn"),
+  copyDiagnosticsBtn: $("copyDiagnosticsBtn"),
   clearLog: $("clearLog"),
   logOutput: $("logOutput"),
   framesMetric: $("framesMetric"),
@@ -261,6 +271,43 @@ function log(message, data) {
   const timestamp = new Date().toLocaleTimeString();
   const text = typeof data === "undefined" ? message : `${message}\n${JSON.stringify(data, null, 2)}`;
   els.logOutput.textContent = `[${timestamp}] ${text}\n\n${els.logOutput.textContent}`;
+}
+
+async function copyDiagnostics() {
+  requireTauri();
+  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+  const context = await invoke("diagnostics_context", {
+    selectedScreenId: els.screenSelect.value || state.selectedScreenId || null,
+    provider: els.providerSelect.value,
+    modelPath: els.modelPath.value.trim(),
+    confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+  });
+  const payload = {
+    generated_at: new Date().toISOString(),
+    ui_state: {
+      selected_screen_id: els.screenSelect.value || state.selectedScreenId || null,
+      requested_provider: els.providerSelect.value,
+      requested_model_path: els.modelPath.value.trim(),
+      confidence_threshold: els.confidenceInput.value,
+      status_pill: els.statusPill.textContent,
+    },
+    diagnostics: context,
+    live_summary: state.lastSnapshotSummary,
+    recent_log: els.logOutput.textContent,
+  };
+  const report = JSON.stringify(payload, null, 2);
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(report);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = report;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  log(t("copyDiagnostics"), payload.diagnostics);
+  setStatus(t("copyDiagnostics"), "success");
 }
 
 function requireTauri() {
@@ -298,6 +345,8 @@ function setBusy(isBusy) {
     els.refreshScreensBtn,
     els.startLiveBtn,
     els.stopLiveBtn,
+    els.showOverlayBtn,
+    els.hideOverlayBtn,
     els.chooseInput,
     els.chooseOutput,
   ].forEach((button) => {
@@ -474,6 +523,18 @@ async function pollLiveSnapshot() {
   });
   state.lastCursor = snapshot.cursor;
   state.lastFrame = snapshot.frame;
+  state.lastSnapshotSummary = {
+    screen_id: snapshot.screen_id,
+    cursor: snapshot.cursor,
+    cursor_on_screen: snapshot.cursor_on_screen,
+    people_count: (snapshot.people || []).length,
+    provider: snapshot.provider,
+    model_status: snapshot.model_status,
+    capture_status: snapshot.capture_status,
+    frame_size: snapshot.frame?.frame_size,
+    screen_size: snapshot.frame?.screen_size,
+    capture_backend: snapshot.frame?.capture_backend,
+  };
   const people = snapshot.people || [];
   state.detectedPeople = people;
   els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
@@ -491,9 +552,11 @@ function stopLiveMonitor() {
   }
   state.detectedPeople = [];
   state.lastFrame = null;
+  state.lastSnapshotSummary = null;
   renderPeople([]);
   els.liveState.textContent = t("liveStopped");
   setStatus(t("liveStoppedStatus"), "ready");
+  invoke?.("close_overlay_window").catch?.(() => {});
 }
 
 function updateMetrics(summary) {
@@ -584,6 +647,24 @@ els.stopLiveBtn.addEventListener("click", () => {
   stopLiveMonitor();
 });
 
+els.showOverlayBtn.addEventListener("click", async () => {
+  await runAction(t("showOverlay"), async () => {
+    const screenId = els.screenSelect.value || state.selectedScreenId;
+    if (!screenId) {
+      throw new Error(t("noScreens"));
+    }
+    await invoke("open_overlay_window", { screenId });
+    setStatus(t("showOverlay"), "success");
+  });
+});
+
+els.hideOverlayBtn.addEventListener("click", async () => {
+  await runAction(t("hideOverlay"), async () => {
+    await invoke("close_overlay_window");
+    setStatus(t("hideOverlay"), "ready");
+  });
+});
+
 els.validateBtn.addEventListener("click", async () => {
   await runAction(t("validating"), async () => {
     const diagnostics = await invoke("validate_dataset", { path: requireInputPath() });
@@ -660,6 +741,12 @@ els.applyUpdateBtn.addEventListener("click", async () => {
     const result = await invoke("apply_update", { installDir: null });
     setStatus(t("applyUpdateStarted"), result.success ? "success" : "warning");
     log(t("applyUpdateStarted"), result);
+  });
+});
+
+els.copyDiagnosticsBtn.addEventListener("click", async () => {
+  await runAction(t("copyDiagnostics"), async () => {
+    await copyDiagnostics();
   });
 });
 
