@@ -1,0 +1,30 @@
+crates/autoaim-app/ui/index.html
+  s_a1b878ef266498::t_6b94631026a7ee 15
+crates/autoaim-app/ui/main.js
+  s_a1b878ef266498::t_547f66735e7e7b 221-239,251,461-514,567-568,575-577,590,592,755,1013-1015,1017,1049-1059
+  s_a1b878ef266498::t_ba2ef961e3aa15 9,115
+crates/autoaim-app/ui/overlay.js
+  s_a1b878ef266498::t_334d1d1c20fe17 5-23,46-99,111-114,119-121,128,130
+crates/autoaim-app/src/main.rs
+  s_a1b878ef266498::t_06a215a01935a6 798,803-814
+  s_a1b878ef266498::t_ae77ff4f8f8b73 1076-1081,1083,1097,1099-1107,1109-1118
+  s_a1b878ef266498::t_62e9a4ac15d45d 1064,1121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "a499756a0f2f7553ff7170e1ba989c0b0c5931c5",
+  "prompts": {},
+  "sessions": {
+    "s_a1b878ef266498": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a47d1a0642460ddeddc9231",
+        "model": "gpt-5.5__max"
+      },
+      "human_author": "mashichen <mashichen.msc@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
