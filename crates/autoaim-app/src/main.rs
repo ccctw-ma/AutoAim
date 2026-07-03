@@ -44,6 +44,14 @@ const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
+#[cfg(target_os = "windows")]
+const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn SetWindowDisplayAffinity(hwnd: isize, affinity: u32) -> i32;
+}
 
 #[derive(Debug, Serialize)]
 struct AppInfo {
@@ -238,11 +246,8 @@ fn list_screens(window: tauri::Window) -> Result<Vec<ScreenInfo>, String> {
 }
 
 #[tauri::command]
-fn live_monitor_snapshot(
+async fn live_monitor_snapshot(
     app: tauri::AppHandle,
-    tracking_state: tauri::State<LiveTrackingState>,
-    detector_state: tauri::State<LiveDetectorState>,
-    overlay_state: tauri::State<OverlayState>,
     window: tauri::Window,
     screen_id: String,
     model_path: Option<String>,
@@ -255,10 +260,37 @@ fn live_monitor_snapshot(
         .find(|item| item.id == screen_id)
         .or_else(|| screens.iter().find(|item| item.primary))
         .or_else(|| screens.first())
+        .cloned()
         .ok_or_else(|| "no screens found".to_string())?;
+    let config = native_inference_config(provider, model_path, confidence_threshold)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let tracking_state = app.state::<LiveTrackingState>();
+        let detector_state = app.state::<LiveDetectorState>();
+        let overlay_state = app.state::<OverlayState>();
+        build_live_monitor_snapshot(
+            &app,
+            &tracking_state,
+            &detector_state,
+            &overlay_state,
+            &screen,
+            config,
+        )
+    })
+    .await
+    .map_err(|error| format!("live monitor worker failed: {error}"))?
+}
+
+fn build_live_monitor_snapshot(
+    app: &tauri::AppHandle,
+    tracking_state: &LiveTrackingState,
+    detector_state: &LiveDetectorState,
+    overlay_state: &OverlayState,
+    screen: &ScreenInfo,
+    config: NativeInferenceConfig,
+) -> Result<LiveMonitorSnapshot, String> {
     let frame = capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
         .map_err(|error| error.to_string())?;
-    let config = native_inference_config(provider, model_path, confidence_threshold)?;
     let inference = detect_with_cached_live_detector(&detector_state, config, &frame)?;
     let mut tracked_objects = inference.objects.clone();
     apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)
@@ -763,7 +795,8 @@ fn enforce_overlay_topmost(window: &tauri::Window) -> Result<(), String> {
     let hwnd = window
         .hwnd()
         .map_err(|error| format!("failed to get overlay hwnd: {error}"))?;
-    let hwnd = hwnd.0 as _;
+    let raw_hwnd = hwnd.0 as isize;
+    let hwnd = raw_hwnd as _;
     unsafe {
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let next_style = style
@@ -784,6 +817,9 @@ fn enforce_overlay_topmost(window: &tauri::Window) -> Result<(), String> {
         );
         if ok == 0 {
             return Err("failed to force overlay topmost window style".to_string());
+        }
+        if SetWindowDisplayAffinity(raw_hwnd, WDA_EXCLUDEFROMCAPTURE) == 0 {
+            append_app_log("backend", "overlay exclude-from-capture unsupported", None);
         }
     }
     Ok(())

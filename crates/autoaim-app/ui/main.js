@@ -217,6 +217,8 @@ const i18n = {
 };
 
 const LIVE_POLL_INTERVAL_MS = 250;
+const LIVE_SNAPSHOT_TIMEOUT_MS = 3500;
+const OPEN_OVERLAY_TIMEOUT_MS = 3500;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
 const SKELETON_CONNECTIONS = [
@@ -351,6 +353,20 @@ function log(message, data) {
     els.logOutput.textContent = `[${timestamp}] ${text}\n\n${els.logOutput.textContent}`;
   }
   writeFileLog("ui", message, data);
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 async function copyDiagnostics() {
@@ -686,10 +702,14 @@ async function openOverlayForSelectedScreen() {
     screenId,
     options: currentInferenceOptions(),
   });
-  await invoke("open_overlay_window", {
-    screenId,
-    ...currentInferenceOptions(),
-  });
+  await withTimeout(
+    invoke("open_overlay_window", {
+      screenId,
+      ...currentInferenceOptions(),
+    }),
+    OPEN_OVERLAY_TIMEOUT_MS,
+    "open_overlay_window",
+  );
 }
 
 async function pollLiveSnapshot(sessionId = state.liveSessionId) {
@@ -705,10 +725,14 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
   state.livePolling = true;
   els.modelStatusReadout.textContent = t("modelLoading");
   try {
-    const snapshot = await invoke("live_monitor_snapshot", {
-      screenId,
-      ...currentInferenceOptions(),
-    });
+    const snapshot = await withTimeout(
+      invoke("live_monitor_snapshot", {
+        screenId,
+        ...currentInferenceOptions(),
+      }),
+      LIVE_SNAPSHOT_TIMEOUT_MS,
+      "live_monitor_snapshot",
+    );
     if (sessionId !== state.liveSessionId) {
       return false;
     }
@@ -750,7 +774,7 @@ function clearLiveTimer() {
   }
 }
 
-function scheduleLivePoll(sessionId) {
+function scheduleLivePoll(sessionId, delayMs = LIVE_POLL_INTERVAL_MS) {
   clearLiveTimer();
   if (!state.liveRunning || sessionId !== state.liveSessionId) {
     return;
@@ -769,7 +793,7 @@ function scheduleLivePoll(sessionId) {
       setStatus(error?.message || String(error), "error");
       stopLiveMonitor();
     }
-  }, LIVE_POLL_INTERVAL_MS);
+  }, delayMs);
 }
 
 function stopLiveMonitor() {
@@ -1013,13 +1037,9 @@ on(els.startLiveBtn, "click", async () => {
     const liveSessionId = state.liveSessionId;
     await openOverlayForSelectedScreen();
     state.liveRunning = true;
-    const didPoll = await pollLiveSnapshot(liveSessionId);
-    if (!didPoll) {
-      throw new Error(t("liveBusy"));
-    }
-    scheduleLivePoll(liveSessionId);
     els.liveState.textContent = t("liveRunning");
     setStatus(t("liveStarted"), "success");
+    scheduleLivePoll(liveSessionId, 0);
   });
 });
 
