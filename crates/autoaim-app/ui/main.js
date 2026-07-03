@@ -4,18 +4,18 @@ const dialog = tauriApi.dialog;
 
 const i18n = {
   en: {
-    eyebrow: "Rust + Tauri live monitor",
+    eyebrow: "Windows review utility",
     title: "AutoAim Review",
-    subtitle: "Select a screen, start live monitoring, and inspect cursor plus person positions in real time.",
+    subtitle: "Select a screen and run visual monitoring. Review-only, no input control.",
     languageLabel: "Language",
     liveKicker: "Live",
-    liveTitle: "Monitor a screen",
+    liveTitle: "Screen monitor",
     screen: "Screen",
-    refreshScreens: "Refresh screens",
-    startLive: "Start now",
+    refreshScreens: "Refresh",
+    startLive: "Start",
     stopLive: "Stop",
-    showOverlay: "Show overlay",
-    hideOverlay: "Hide overlay",
+    showOverlay: "Overlay",
+    hideOverlay: "Close overlay",
     liveStopped: "Stopped",
     liveRunning: "Running",
     liveStarting: "Starting live monitor...",
@@ -26,12 +26,12 @@ const i18n = {
     modelLoading: "Capturing screen and running detector...",
     modelLoaded: "Native detector ready.",
     modelUnavailable: "Person detector unavailable.",
-    mousePosition: "Mouse position",
+    mousePosition: "Mouse",
     peopleCount: "People",
     modelStatus: "Model",
     captureStatus: "Capture",
-    peopleKicker: "Positions",
-    peopleTitle: "Detected people",
+    peopleKicker: "Detection",
+    peopleTitle: "People",
     noPeople: "No people detected.",
     workflowKicker: "Offline",
     workflowTitle: "Dataset tools",
@@ -46,10 +46,11 @@ const i18n = {
     preview: "Preview events",
     writeEvents: "Write events",
     runtimeKicker: "Runtime",
-    runtimeTitle: "MoveNet pose inference and updates",
+    runtimeTitle: "Inference",
     provider: "Provider",
     threshold: "Confidence",
     modelPath: "Model path",
+    modelPathPlaceholder: "Bundled model",
     showRuntime: "Show config",
     checkUpdates: "Check updates",
     applyUpdate: "Apply update",
@@ -70,9 +71,9 @@ const i18n = {
     guide4: "Write event JSONL when you need review-only inference results.",
     nextTitle: "Next runtime modules",
     nextText: "Live mode uses native Windows screen capture, cursor polling, and the Rust inference boundary.",
-    consoleKicker: "Output",
-    consoleTitle: "Command result",
-    copyDiagnostics: "Copy diagnostics",
+    consoleKicker: "Diagnostics",
+    consoleTitle: "Log",
+    copyDiagnostics: "Copy",
     clear: "Clear",
     validating: "Validating dataset...",
     validationOk: "Validation passed.",
@@ -99,18 +100,18 @@ const i18n = {
     noScreens: "No screens available.",
   },
   zh: {
-    eyebrow: "Rust + Tauri 实时监控",
+    eyebrow: "Windows 审阅工具",
     title: "AutoAim Review",
-    subtitle: "选择屏幕后立即开始，实时查看鼠标位置和画面中的人物位置。",
+    subtitle: "选择屏幕后进行视觉监测，仅用于审阅，不控制输入。",
     languageLabel: "语言",
     liveKicker: "实时",
-    liveTitle: "监控屏幕",
+    liveTitle: "屏幕监测",
     screen: "屏幕",
-    refreshScreens: "刷新屏幕",
-    startLive: "立即开始",
+    refreshScreens: "刷新",
+    startLive: "开始",
     stopLive: "停止",
-    showOverlay: "显示悬浮层",
-    hideOverlay: "隐藏悬浮层",
+    showOverlay: "悬浮层",
+    hideOverlay: "关闭悬浮层",
     liveStopped: "已停止",
     liveRunning: "运行中",
     liveStarting: "正在启动实时监控...",
@@ -121,12 +122,12 @@ const i18n = {
     modelLoading: "正在采集屏幕并运行检测器...",
     modelLoaded: "原生检测器已就绪。",
     modelUnavailable: "人物检测模型不可用。",
-    mousePosition: "鼠标位置",
+    mousePosition: "鼠标",
     peopleCount: "人物数",
     modelStatus: "模型",
     captureStatus: "采集",
-    peopleKicker: "位置",
-    peopleTitle: "识别到的人物",
+    peopleKicker: "检测",
+    peopleTitle: "人物",
     noPeople: "暂未识别到人物。",
     workflowKicker: "离线",
     workflowTitle: "数据集工具",
@@ -141,10 +142,11 @@ const i18n = {
     preview: "预览事件",
     writeEvents: "写出事件",
     runtimeKicker: "运行时",
-    runtimeTitle: "MoveNet 姿态推理与更新",
+    runtimeTitle: "推理",
     provider: "推理后端",
     threshold: "置信度",
     modelPath: "模型路径",
+    modelPathPlaceholder: "使用内置模型",
     showRuntime: "显示配置",
     checkUpdates: "检查更新",
     applyUpdate: "立即更新",
@@ -165,9 +167,9 @@ const i18n = {
     guide4: "需要审阅用推理结果时，写出事件 JSONL。",
     nextTitle: "后续运行时模块",
     nextText: "实时模式使用 Windows 原生屏幕采集、鼠标轮询和 Rust 推理边界。",
-    consoleKicker: "输出",
-    consoleTitle: "命令结果",
-    copyDiagnostics: "复制诊断",
+    consoleKicker: "诊断",
+    consoleTitle: "日志",
+    copyDiagnostics: "复制",
     clear: "清空",
     validating: "正在校验数据集...",
     validationOk: "校验通过。",
@@ -198,7 +200,7 @@ const i18n = {
 const LIVE_POLL_INTERVAL_MS = 250;
 
 const state = {
-  language: localStorage.getItem("autoaim.language") || "en",
+  language: localStorage.getItem("autoaim.language") || "zh",
   liveTimer: null,
   liveRunning: false,
   livePolling: false,
@@ -212,6 +214,9 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const on = (element, eventName, handler) => {
+  element?.addEventListener(eventName, handler);
+};
 
 const els = {
   languageSelect: $("languageSelect"),
@@ -262,19 +267,30 @@ function applyLanguage(language) {
   state.language = language;
   localStorage.setItem("autoaim.language", language);
   document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
-  els.languageSelect.value = language;
+  if (els.languageSelect) {
+    els.languageSelect.value = language;
+  }
 
   document.querySelectorAll("[data-i18n]").forEach((node) => {
     node.textContent = t(node.dataset.i18n);
   });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+    node.placeholder = t(node.dataset.i18nPlaceholder);
+  });
 }
 
 function setStatus(message, tone = "ready") {
+  if (!els.statusPill) {
+    return;
+  }
   els.statusPill.textContent = message;
   els.statusPill.dataset.tone = tone;
 }
 
 function log(message, data) {
+  if (!els.logOutput) {
+    return;
+  }
   const timestamp = new Date().toLocaleTimeString();
   const text = typeof data === "undefined" ? message : `${message}\n${JSON.stringify(data, null, 2)}`;
   els.logOutput.textContent = `[${timestamp}] ${text}\n\n${els.logOutput.textContent}`;
@@ -356,7 +372,7 @@ function setBusy(isBusy) {
     els.hideOverlayBtn,
     els.chooseInput,
     els.chooseOutput,
-  ].forEach((button) => {
+  ].filter(Boolean).forEach((button) => {
     button.disabled = isBusy;
   });
 }
@@ -372,7 +388,7 @@ function decodeRgbaBase64(base64) {
 
 function drawNativeFrame(ctx, canvas, frame) {
   if (!frame?.rgba_base64) {
-    ctx.fillStyle = "#07111f";
+    ctx.fillStyle = "#111111";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     return;
   }
@@ -396,7 +412,7 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
   drawNativeFrame(ctx, canvas, snapshot.frame);
 
   const grid = 48;
-  ctx.strokeStyle = "rgba(148, 163, 184, 0.13)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
   ctx.lineWidth = 1;
   for (let x = 0; x < width; x += grid) {
     ctx.beginPath();
@@ -422,8 +438,8 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
 
   const cursorX = (snapshot.cursor[0] - originX) * scaleX;
   const cursorY = (snapshot.cursor[1] - originY) * scaleY;
-  ctx.strokeStyle = "#22d3ee";
-  ctx.fillStyle = "#22d3ee";
+  ctx.strokeStyle = "#ffffff";
+  ctx.fillStyle = "#ffffff";
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(cursorX - 12, cursorY);
@@ -435,21 +451,29 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
   ctx.arc(cursorX, cursorY, 4, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.strokeStyle = "#f97316";
-  ctx.fillStyle = "#f97316";
   people.forEach((person) => {
     const [x, y, w, h] = person.bbox;
     const rectX = (x - originX) * scaleX;
     const rectY = (y - originY) * scaleY;
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(rectX, rectY, w * scaleX, h * scaleY);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
     ctx.strokeRect(rectX, rectY, w * scaleX, h * scaleY);
     const headX = (person.head_point[0] - originX) * scaleX;
     const headY = (person.head_point[1] - originY) * scaleY;
+    ctx.fillStyle = "#000000";
     ctx.beginPath();
-    ctx.arc(headX, headY, 5, 0, Math.PI * 2);
+    ctx.arc(headX, headY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(headX, headY, 4, 0, Math.PI * 2);
     ctx.fill();
 
     if (Array.isArray(person.keypoints)) {
-      ctx.fillStyle = "#a7f3d0";
+      ctx.fillStyle = "#ffffff";
       person.keypoints
         .filter((keypoint) => keypoint.score >= 0.2)
         .forEach((keypoint) => {
@@ -459,7 +483,6 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
           ctx.arc(keypointX, keypointY, 3, 0, Math.PI * 2);
           ctx.fill();
         });
-      ctx.fillStyle = "#f97316";
     }
   });
 }
@@ -610,6 +633,9 @@ function stopLiveMonitor() {
 }
 
 function updateMetrics(summary) {
+  if (!els.framesMetric) {
+    return;
+  }
   els.framesMetric.textContent = summary.frame_count ?? "-";
   els.objectsMetric.textContent = summary.object_count ?? "-";
   els.targetsMetric.textContent = summary.target_count ?? "-";
@@ -632,11 +658,11 @@ async function runAction(statusText, action) {
   }
 }
 
-els.languageSelect.addEventListener("change", (event) => {
+on(els.languageSelect, "change", (event) => {
   applyLanguage(event.target.value);
 });
 
-els.chooseInput.addEventListener("click", async () => {
+on(els.chooseInput, "click", async () => {
   await runAction(t("selected"), async () => {
     const selected = await dialog.open({
       filters: [{ name: "JSONL", extensions: ["jsonl"] }],
@@ -649,7 +675,7 @@ els.chooseInput.addEventListener("click", async () => {
   });
 });
 
-els.chooseOutput.addEventListener("click", async () => {
+on(els.chooseOutput, "click", async () => {
   await runAction(t("outputSelected"), async () => {
     const selected = await dialog.save({
       defaultPath: "events.jsonl",
@@ -662,18 +688,18 @@ els.chooseOutput.addEventListener("click", async () => {
   });
 });
 
-els.refreshScreensBtn.addEventListener("click", async () => {
+on(els.refreshScreensBtn, "click", async () => {
   await runAction(t("screensLoaded"), async () => {
     const screens = await refreshScreens();
     setStatus(screens.length ? t("screensLoaded") : t("noScreens"), screens.length ? "success" : "warning");
   });
 });
 
-els.screenSelect.addEventListener("change", (event) => {
+on(els.screenSelect, "change", (event) => {
   state.selectedScreenId = event.target.value;
 });
 
-els.startLiveBtn.addEventListener("click", async () => {
+on(els.startLiveBtn, "click", async () => {
   await runAction(t("liveStarting"), async () => {
     if (state.livePolling) {
       throw new Error(t("liveBusy"));
@@ -696,11 +722,11 @@ els.startLiveBtn.addEventListener("click", async () => {
   });
 });
 
-els.stopLiveBtn.addEventListener("click", () => {
+on(els.stopLiveBtn, "click", () => {
   stopLiveMonitor();
 });
 
-els.showOverlayBtn.addEventListener("click", async () => {
+on(els.showOverlayBtn, "click", async () => {
   await runAction(t("showOverlay"), async () => {
     const screenId = els.screenSelect.value || state.selectedScreenId;
     if (!screenId) {
@@ -711,14 +737,14 @@ els.showOverlayBtn.addEventListener("click", async () => {
   });
 });
 
-els.hideOverlayBtn.addEventListener("click", async () => {
+on(els.hideOverlayBtn, "click", async () => {
   await runAction(t("hideOverlay"), async () => {
     await invoke("close_overlay_window");
     setStatus(t("hideOverlay"), "ready");
   });
 });
 
-els.validateBtn.addEventListener("click", async () => {
+on(els.validateBtn, "click", async () => {
   await runAction(t("validating"), async () => {
     const diagnostics = await invoke("validate_dataset", { path: requireInputPath() });
     if (diagnostics.length === 0) {
@@ -731,7 +757,7 @@ els.validateBtn.addEventListener("click", async () => {
   });
 });
 
-els.evaluateBtn.addEventListener("click", async () => {
+on(els.evaluateBtn, "click", async () => {
   await runAction(t("evaluating"), async () => {
     const result = await invoke("evaluate_dataset", { path: requireInputPath() });
     updateMetrics(result.summary);
@@ -740,7 +766,7 @@ els.evaluateBtn.addEventListener("click", async () => {
   });
 });
 
-els.positionsBtn.addEventListener("click", async () => {
+on(els.positionsBtn, "click", async () => {
   await runAction(t("positionsPreviewing"), async () => {
     const result = await invoke("preview_person_positions", { path: requireInputPath(), limit: 50 });
     setStatus(t("positionsDone"), "success");
@@ -748,7 +774,7 @@ els.positionsBtn.addEventListener("click", async () => {
   });
 });
 
-els.previewBtn.addEventListener("click", async () => {
+on(els.previewBtn, "click", async () => {
   await runAction(t("previewing"), async () => {
     const result = await invoke("preview_events", { path: requireInputPath(), limit: 20 });
     setStatus(t("previewDone"), "success");
@@ -756,7 +782,7 @@ els.previewBtn.addEventListener("click", async () => {
   });
 });
 
-els.writeBtn.addEventListener("click", async () => {
+on(els.writeBtn, "click", async () => {
   await runAction(t("writing"), async () => {
     const result = await invoke("write_events", {
       inputPath: requireInputPath(),
@@ -767,7 +793,7 @@ els.writeBtn.addEventListener("click", async () => {
   });
 });
 
-els.showRuntimeBtn.addEventListener("click", async () => {
+on(els.showRuntimeBtn, "click", async () => {
   await runAction(t("runtimeReady"), async () => {
     const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
     const config = await invoke("inference_runtime_config", {
@@ -781,7 +807,7 @@ els.showRuntimeBtn.addEventListener("click", async () => {
   });
 });
 
-els.checkUpdatesBtn.addEventListener("click", async () => {
+on(els.checkUpdatesBtn, "click", async () => {
   await runAction(t("checkingUpdates"), async () => {
     const result = await invoke("check_updates", { installDir: null });
     setStatus(t("updateCheckDone"), result.success ? "success" : "warning");
@@ -789,7 +815,7 @@ els.checkUpdatesBtn.addEventListener("click", async () => {
   });
 });
 
-els.applyUpdateBtn.addEventListener("click", async () => {
+on(els.applyUpdateBtn, "click", async () => {
   await runAction(t("applyingUpdate"), async () => {
     const result = await invoke("apply_update", { installDir: null });
     setStatus(t("applyUpdateStarted"), result.success ? "success" : "warning");
@@ -797,14 +823,16 @@ els.applyUpdateBtn.addEventListener("click", async () => {
   });
 });
 
-els.copyDiagnosticsBtn.addEventListener("click", async () => {
+on(els.copyDiagnosticsBtn, "click", async () => {
   await runAction(t("copyDiagnostics"), async () => {
     await copyDiagnostics();
   });
 });
 
-els.clearLog.addEventListener("click", () => {
-  els.logOutput.textContent = "";
+on(els.clearLog, "click", () => {
+  if (els.logOutput) {
+    els.logOutput.textContent = "";
+  }
 });
 
 applyLanguage(state.language);
