@@ -77,6 +77,15 @@ jobs:
             "available=false" >> $env:GITHUB_OUTPUT
           }
 
+      - name: Prepare bundled models
+        shell: pwsh
+        env:
+          AUTOAIM_MODEL_PACKAGE: dist\previous\AutoAimReview-windows-x64.zip
+          AUTOAIM_MODEL_PACKAGE_URL: ${{ vars.AUTOAIM_MODEL_PACKAGE_URL }}
+          AUTOAIM_MOVENET_ONNX_URL: ${{ vars.AUTOAIM_MOVENET_ONNX_URL }}
+          AUTOAIM_MOVENET_TFLITE_URL: ${{ vars.AUTOAIM_MOVENET_TFLITE_URL }}
+        run: python scripts\prepare_models.py
+
       - name: Run Rust tests
         shell: pwsh
         run: |

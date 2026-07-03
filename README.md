@@ -71,6 +71,26 @@ cargo run -p autoaim-cli -- positions examples/sample_frames.jsonl --assist-even
 cargo run -p autoaim-cli -- run-jsonl examples/sample_frames.jsonl .e2e-output/events.jsonl
 ```
 
+## Model Files
+
+Large model weights and generated review artifacts are not stored in Git. Keep
+local weights under `models/`; `.gitignore` prevents `.onnx`, `.tflite`, images,
+videos, and generated `artifacts/` output from being committed.
+
+Prepare the bundled MoveNet files from a previous release zip:
+
+```bash
+python scripts/prepare_models.py --package path/to/AutoAimReview-windows-x64.zip
+```
+
+For CI or a fresh machine, either provide a previous release package or set:
+
+```bash
+AUTOAIM_MOVENET_ONNX_URL=https://example/movenet_lightning.onnx
+AUTOAIM_MOVENET_TFLITE_URL=https://example/movenet_lightning.tflite
+python scripts/prepare_models.py
+```
+
 ## Windows GUI
 
 The current Windows GUI is a Rust + Tauri desktop app. It is intended to make

@@ -41,6 +41,16 @@ def copy_file(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
+def copy_required_model(repo: Path, name: str, destination: Path) -> None:
+    source = repo / "models" / name
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"missing model file: {source}. Run `python scripts/prepare_models.py` "
+            "or copy the model into models/ before building a Windows package."
+        )
+    copy_file(source, destination)
+
+
 def write_logo_ico(path: Path, size: int = 64) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pixels: list[tuple[int, int, int, int]] = []
@@ -308,14 +318,8 @@ def build_package(args: argparse.Namespace) -> None:
     copy_file(repo / "windows" / "update.ps1", windows_dir / "update.ps1")
     copy_file(repo / "assets" / "logo.svg", assets_dir / "logo.svg")
     write_logo_ico(assets_dir / "logo.ico")
-    copy_file(
-        repo / "models" / "movenet_lightning.tflite",
-        models_dir / "movenet_lightning.tflite",
-    )
-    copy_file(
-        repo / "models" / "movenet_lightning.onnx",
-        models_dir / "movenet_lightning.onnx",
-    )
+    copy_required_model(repo, "movenet_lightning.tflite", models_dir / "movenet_lightning.tflite")
+    copy_required_model(repo, "movenet_lightning.onnx", models_dir / "movenet_lightning.onnx")
     copy_file(repo / "examples" / "sample_frames.jsonl", examples_dir / "sample_frames.jsonl")
     copy_file(repo / "README.md", package_root / "README.md")
     copy_file(repo / "LICENSE", package_root / "LICENSE")
