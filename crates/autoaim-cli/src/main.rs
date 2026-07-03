@@ -1,5 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use autoaim_capture::{capture_screen_frame, CaptureBackend, CapturedFrame};
 use autoaim_core::{read_jsonl_path, suggest_frames, summarize, validate_records, TargetScorer};
+use autoaim_infer::{
+    InferenceConfig as NativeInferenceConfig, NativeInferenceProvider, NativePersonDetector,
+    PersonDetector,
+};
 use autoaim_ipc::encode_json_line;
 use autoaim_runtime::{
     mock_native_detections, JsonlEventWriter, LiveDetectionInput, ReviewPipeline,
@@ -40,6 +45,24 @@ struct DetectorBenchResult {
     p95_ms: f64,
     max_ms: f64,
     detections_per_run: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct GpuSmokeResult {
+    provider: String,
+    model_path: String,
+    frame_source: String,
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+    iterations: usize,
+    total_ms: f64,
+    mean_ms: f64,
+    min_ms: f64,
+    max_ms: f64,
+    objects: usize,
+    poses: usize,
+    keypoints: usize,
+    model_status: String,
 }
 
 #[derive(Debug, Parser)]
@@ -96,6 +119,24 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         iterations: usize,
     },
+    /// Capture the primary screen and run the GPU MoveNet inference path.
+    GpuSmoke {
+        /// Inference provider to exercise.
+        #[arg(long, default_value = "directml")]
+        provider: String,
+        /// Model path, defaults to models/movenet_lightning.onnx.
+        #[arg(long)]
+        model_path: Option<PathBuf>,
+        /// Number of inference iterations to run.
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        /// Confidence threshold for decoded poses.
+        #[arg(long, default_value_t = 0.25)]
+        confidence_threshold: f32,
+        /// Fail when the model runs but no pose is detected.
+        #[arg(long)]
+        fail_on_zero_pose: bool,
+    },
     /// Check for or apply updates from the Windows binary installation.
     Update {
         /// Show detected upstream changes without updating files.
@@ -136,6 +177,19 @@ fn run() -> Result<()> {
             image_dir,
             iterations,
         } => bench_detector(image_dir, iterations),
+        Command::GpuSmoke {
+            provider,
+            model_path,
+            iterations,
+            confidence_threshold,
+            fail_on_zero_pose,
+        } => gpu_smoke(
+            provider,
+            model_path,
+            iterations,
+            confidence_threshold,
+            fail_on_zero_pose,
+        ),
         Command::Update {
             check,
             show_diff,
@@ -309,6 +363,133 @@ fn bench_detector(image_dir: PathBuf, iterations: usize) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+fn gpu_smoke(
+    provider: String,
+    model_path: Option<PathBuf>,
+    iterations: usize,
+    confidence_threshold: f32,
+    fail_on_zero_pose: bool,
+) -> Result<()> {
+    let provider = NativeInferenceProvider::from_name(&provider)
+        .with_context(|| format!("unsupported inference provider: {provider}"))?;
+    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/movenet_lightning.onnx"));
+    if !model_path.is_file() {
+        anyhow::bail!("model file not found: {}", model_path.display());
+    }
+
+    let screen_size = primary_screen_size()?;
+    let (frame, frame_source) = match capture_screen_frame([0, 0], screen_size, [640, 360]) {
+        Ok(frame) => (frame, "screen_capture".to_string()),
+        Err(error) => (
+            synthetic_smoke_frame(screen_size),
+            format!("synthetic_frame_after_capture_error:{error}"),
+        ),
+    };
+    let config = NativeInferenceConfig::new(
+        provider,
+        Some(model_path.to_string_lossy().to_string()),
+        confidence_threshold,
+    );
+    let detector = NativePersonDetector::from_config(config)?;
+    let iterations = iterations.max(1);
+    let mut samples = Vec::with_capacity(iterations);
+    let mut last_output = None;
+
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let output = detector.detect(&frame)?;
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        last_output = Some(output);
+    }
+
+    let output = last_output.expect("iterations is at least one");
+    if fail_on_zero_pose && output.poses.is_empty() {
+        anyhow::bail!(
+            "GPU inference ran but produced zero poses: {}",
+            output.model_status
+        );
+    }
+
+    let total_ms = samples.iter().sum::<f64>();
+    let min_ms = samples
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, |left, right| left.min(right));
+    let max_ms = samples
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, |left, right| left.max(right));
+    let keypoints = output
+        .poses
+        .iter()
+        .map(|pose| pose.keypoints.len())
+        .sum::<usize>();
+    let result = GpuSmokeResult {
+        provider: output.provider.as_str().to_string(),
+        model_path: model_path.display().to_string(),
+        frame_source,
+        screen_size,
+        frame_size: frame.frame_size,
+        iterations,
+        total_ms,
+        mean_ms: total_ms / iterations as f64,
+        min_ms,
+        max_ms,
+        objects: output.objects.len(),
+        poses: output.poses.len(),
+        keypoints,
+        model_status: output.model_status,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn synthetic_smoke_frame(screen_size: [u32; 2]) -> CapturedFrame {
+    let frame_size = [640_u32, 360_u32];
+    let mut rgba = vec![24_u8; frame_size[0] as usize * frame_size[1] as usize * 4];
+    for y in 0..frame_size[1] as usize {
+        for x in 0..frame_size[0] as usize {
+            let index = (y * frame_size[0] as usize + x) * 4;
+            let in_body = (278..=362).contains(&x) && (80..=312).contains(&y);
+            let in_head = (300..=340).contains(&x) && (40..=86).contains(&y);
+            let value = if in_body || in_head { 210 } else { 24 };
+            rgba[index] = value;
+            rgba[index + 1] = value;
+            rgba[index + 2] = value;
+            rgba[index + 3] = 255;
+        }
+    }
+
+    CapturedFrame {
+        screen_origin: [0, 0],
+        screen_size,
+        frame_size,
+        capture_backend: CaptureBackend::Gdi,
+        rgba,
+        cursor: [screen_size[0] as f32 / 2.0, screen_size[1] as f32 / 2.0],
+        cursor_on_screen: true,
+        timestamp_millis: 0,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn primary_screen_size() -> Result<[u32; 2]> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+
+    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+    if width <= 0 || height <= 0 {
+        anyhow::bail!("failed to read primary screen size");
+    }
+    Ok([width as u32, height as u32])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn primary_screen_size() -> Result<[u32; 2]> {
+    anyhow::bail!("gpu-smoke screen capture is available only on Windows")
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {

@@ -20,6 +20,12 @@ serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-build.workspace = true

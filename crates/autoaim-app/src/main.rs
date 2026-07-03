@@ -28,16 +28,21 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+};
 
 const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
-const OVERLAY_DETECTION_INTERVAL_MS: u64 = 250;
-const OVERLAY_CURSOR_INTERVAL_MS: u64 = 16;
+const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
 
 #[derive(Debug, Serialize)]
@@ -416,6 +421,7 @@ fn live_positions_from_objects(
             let keypoints = poses
                 .get(object_index)
                 .map(|pose| pose.keypoints.clone())
+                .filter(|keypoints| !keypoints.is_empty())
                 .unwrap_or_default();
             LivePersonPosition {
                 object_index,
@@ -579,83 +585,6 @@ fn point_in_overlay_screen(cursor: Point, screen: &ScreenInfo) -> bool {
     x >= left && x < right && y >= top && y < bottom
 }
 
-fn start_overlay_detection_loop(
-    app: tauri::AppHandle,
-    screen: ScreenInfo,
-    config: NativeInferenceConfig,
-    generation: u64,
-) {
-    let screen_id = screen.id.clone();
-    thread::spawn(move || loop {
-        append_app_log(
-            "backend",
-            "overlay detection loop tick",
-            Some(&format!(
-                r#"{{"screen_id":"{}","generation":{generation}}}"#,
-                screen_id
-            )),
-        );
-        let overlay_state = app.state::<OverlayState>();
-        if !overlay_refresh_is_current(&overlay_state, &screen_id, generation) {
-            append_app_log(
-                "backend",
-                "overlay detection loop exit",
-                Some(&format!(
-                    r#"{{"screen_id":"{}","generation":{generation}}}"#,
-                    screen_id
-                )),
-            );
-            break;
-        }
-
-        let Some(window) = app.get_window(OVERLAY_WINDOW_LABEL) else {
-            append_app_log(
-                "backend",
-                "overlay detection loop exit: window missing",
-                None,
-            );
-            break;
-        };
-        let _ = sync_overlay_window(&window, &screen);
-        let _ = window.set_ignore_cursor_events(true);
-        let _ = window.show();
-
-        let started = Instant::now();
-        match build_overlay_snapshot(&app, &screen, config.clone()) {
-            Ok(snapshot) => {
-                let elapsed_ms = started.elapsed().as_millis();
-                append_app_log(
-                    "backend",
-                    "overlay detection success",
-                    Some(&format!(
-                        r#"{{"screen_id":"{}","people":{},"elapsed_ms":{elapsed_ms},"cursor":[{:.1},{:.1}],"cursor_on_screen":{}}}"#,
-                        snapshot.screen_id,
-                        snapshot.people.len(),
-                        snapshot.cursor[0],
-                        snapshot.cursor[1],
-                        snapshot.cursor_on_screen
-                    )),
-                );
-                let overlay_state = app.state::<OverlayState>();
-                emit_overlay_snapshot(&app, &overlay_state, snapshot);
-            }
-            Err(error) => {
-                append_app_log(
-                    "backend",
-                    "overlay detection error",
-                    Some(&format!(
-                        r#"{{"screen_id":"{}","error":"{}"}}"#,
-                        screen_id,
-                        error.replace('"', "'")
-                    )),
-                );
-            }
-        }
-
-        thread::sleep(Duration::from_millis(OVERLAY_DETECTION_INTERVAL_MS));
-    });
-}
-
 fn start_overlay_cursor_loop(app: tauri::AppHandle, screen: ScreenInfo, generation: u64) {
     let screen_id = screen.id.clone();
     append_app_log(
@@ -716,30 +645,6 @@ fn start_overlay_cursor_loop(app: tauri::AppHandle, screen: ScreenInfo, generati
     });
 }
 
-fn build_overlay_snapshot(
-    app: &tauri::AppHandle,
-    screen: &ScreenInfo,
-    config: NativeInferenceConfig,
-) -> Result<OverlaySnapshot, String> {
-    let frame = capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
-        .map_err(|error| error.to_string())?;
-    let detector_state = app.state::<LiveDetectorState>();
-    let inference = detect_with_cached_live_detector(&detector_state, config, &frame)?;
-    let mut tracked_objects = inference.objects.clone();
-    let tracking_state = app.state::<LiveTrackingState>();
-    apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)?;
-    let people = live_positions_from_objects(&tracked_objects, &inference.poses, frame.cursor);
-
-    Ok(OverlaySnapshot {
-        screen_id: screen.id.clone(),
-        screen_origin: frame.screen_origin,
-        screen_size: frame.screen_size,
-        cursor: frame.cursor,
-        cursor_on_screen: frame.cursor_on_screen,
-        people,
-    })
-}
-
 #[tauri::command]
 fn diagnostics_context(
     overlay_state: tauri::State<OverlayState>,
@@ -775,9 +680,9 @@ fn diagnostics_context(
 }
 
 #[tauri::command]
-fn open_overlay_window(
+async fn open_overlay_window(
     app: tauri::AppHandle,
-    overlay_state: tauri::State<OverlayState>,
+    overlay_state: tauri::State<'_, OverlayState>,
     window: tauri::Window,
     screen_id: String,
     model_path: Option<String>,
@@ -790,7 +695,7 @@ fn open_overlay_window(
         .find(|item| item.id == screen_id)
         .cloned()
         .ok_or_else(|| format!("screen not found: {screen_id}"))?;
-    let config = native_inference_config(provider, model_path, confidence_threshold)?;
+    let _ = (provider, model_path, confidence_threshold);
 
     let overlay = if let Some(existing) = app.get_window(OVERLAY_WINDOW_LABEL) {
         existing
@@ -803,7 +708,7 @@ fn open_overlay_window(
         .title("AutoAim Overlay");
         #[cfg(not(target_os = "macos"))]
         let overlay_builder = overlay_builder.transparent(true);
-        overlay_builder
+        let built_overlay = overlay_builder
             .decorations(false)
             .always_on_top(true)
             .skip_taskbar(true)
@@ -811,7 +716,8 @@ fn open_overlay_window(
             .focused(false)
             .visible(false)
             .build()
-            .map_err(|error| format!("failed to create overlay window: {error}"))?
+            .map_err(|error| format!("failed to create overlay window: {error}"))?;
+        built_overlay
     };
 
     sync_overlay_window(&overlay, &screen)?;
@@ -821,7 +727,6 @@ fn open_overlay_window(
         .map_err(|error| format!("failed to show overlay window: {error}"))?;
     let generation = activate_overlay_refresh(&overlay_state, screen.id.clone())?;
     start_overlay_cursor_loop(app.clone(), screen.clone(), generation);
-    start_overlay_detection_loop(app.clone(), screen, config, generation);
     Ok(())
 }
 
@@ -849,6 +754,43 @@ fn sync_overlay_window(window: &tauri::Window, screen: &ScreenInfo) -> Result<()
     window
         .set_size(tauri::PhysicalSize::new(screen.size[0], screen.size[1]))
         .map_err(|error| format!("failed to set overlay size: {error}"))?;
+    enforce_overlay_topmost(window)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn enforce_overlay_topmost(window: &tauri::Window) -> Result<(), String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("failed to get overlay hwnd: {error}"))?;
+    let hwnd = hwnd.0 as _;
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let next_style = style
+            | WS_EX_LAYERED
+            | WS_EX_TRANSPARENT
+            | WS_EX_TOOLWINDOW
+            | WS_EX_TOPMOST
+            | WS_EX_NOACTIVATE;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, next_style as i32);
+        let ok = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        if ok == 0 {
+            return Err("failed to force overlay topmost window style".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enforce_overlay_topmost(_window: &tauri::Window) -> Result<(), String> {
     Ok(())
 }
 

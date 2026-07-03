@@ -13,8 +13,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 autoaim-core = { path = "../autoaim-core" }
+autoaim-capture = { path = "../autoaim-capture" }
+autoaim-infer = { path = "../autoaim-infer", features = ["directml"] }
 autoaim-ipc = { path = "../autoaim-ipc" }
 autoaim-runtime = { path = "../autoaim-runtime" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }

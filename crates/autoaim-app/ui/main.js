@@ -1000,6 +1000,9 @@ on(els.startLiveBtn, "click", async () => {
     state.liveRunning = false;
     clearLiveTimer();
     state.liveSessionId += 1;
+    if (!state.previewFrameEnabled) {
+      setPreviewFrameEnabled(true);
+    }
     log("Live monitor start requested", {
       previewFrameEnabled: state.previewFrameEnabled,
       screenId: els.screenSelect.value || state.selectedScreenId,
