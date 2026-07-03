@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use autoaim_capture::{capture_screen_frame, CapturedFrame, CapturedFramePreview};
+use autoaim_capture::{capture_screen_frame, cursor_position, CapturedFrame, CapturedFramePreview};
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
     ObjectTracker, Point, TargetScorer, ValidationDiagnostic,
@@ -22,7 +22,12 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 
@@ -30,6 +35,9 @@ const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
+const OVERLAY_DETECTION_INTERVAL_MS: u64 = 250;
+const OVERLAY_CURSOR_INTERVAL_MS: u64 = 16;
+const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
 
 #[derive(Debug, Serialize)]
 struct AppInfo {
@@ -87,7 +95,7 @@ struct UpdateCommandResult {
     latest_version: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct ScreenInfo {
     id: String,
     name: String,
@@ -132,6 +140,15 @@ struct OverlaySnapshot {
     people: Vec<LivePersonPosition>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct OverlayCursorSnapshot {
+    screen_id: String,
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    cursor: Point,
+    cursor_on_screen: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct DiagnosticContext {
     app_name: &'static str,
@@ -161,9 +178,18 @@ struct LiveDetectorState {
     detector: Mutex<Option<CachedLiveDetector>>,
 }
 
-#[derive(Default)]
 struct OverlayState {
     active_screen_id: Mutex<Option<String>>,
+    refresh_generation: AtomicU64,
+}
+
+impl Default for OverlayState {
+    fn default() -> Self {
+        Self {
+            active_screen_id: Mutex::new(None),
+            refresh_generation: AtomicU64::new(0),
+        }
+    }
 }
 
 #[tauri::command]
@@ -443,6 +469,254 @@ fn emit_overlay_snapshot(
     }
 }
 
+fn log_file_path() -> PathBuf {
+    let base = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("AutoAimReview").join("logs").join("autoaim-review.log")
+}
+
+fn append_app_log(scope: &str, message: &str, payload: Option<&str>) {
+    let path = log_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let line = match payload {
+        Some(value) if !value.trim().is_empty() => {
+            format!("[{millis}] [{scope}] {message} | {value}\n")
+        }
+        _ => format!("[{millis}] [{scope}] {message}\n"),
+    };
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+#[tauri::command]
+fn frontend_log(scope: String, message: String, payload: Option<String>) {
+    append_app_log(&scope, &message, payload.as_deref());
+}
+
+fn activate_overlay_refresh(overlay_state: &OverlayState, screen_id: String) -> Result<u64, String> {
+    {
+        let mut active_screen_id = overlay_state
+            .active_screen_id
+            .lock()
+            .map_err(|_| "overlay state lock poisoned".to_string())?;
+        *active_screen_id = Some(screen_id);
+    }
+
+    let generation = overlay_state
+        .refresh_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    append_app_log(
+        "backend",
+        "overlay refresh activated",
+        Some(&format!(r#"{{"generation":{generation}}}"#)),
+    );
+    Ok(generation)
+}
+
+fn deactivate_overlay_refresh(overlay_state: &OverlayState) -> Result<(), String> {
+    {
+        let mut active_screen_id = overlay_state
+            .active_screen_id
+            .lock()
+            .map_err(|_| "overlay state lock poisoned".to_string())?;
+        *active_screen_id = None;
+    }
+
+    let previous = overlay_state
+        .refresh_generation
+        .fetch_add(1, Ordering::SeqCst);
+    append_app_log(
+        "backend",
+        "overlay refresh deactivated",
+        Some(&format!(r#"{{"previous_generation":{previous}}}"#)),
+    );
+    Ok(())
+}
+
+fn overlay_refresh_is_current(
+    overlay_state: &OverlayState,
+    screen_id: &str,
+    generation: u64,
+) -> bool {
+    if overlay_state.refresh_generation.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+
+    overlay_state
+        .active_screen_id
+        .lock()
+        .map(|active| active.as_deref() == Some(screen_id))
+        .unwrap_or(false)
+}
+
+fn point_in_overlay_screen(cursor: Point, screen: &ScreenInfo) -> bool {
+    let x = cursor[0];
+    let y = cursor[1];
+    let left = screen.origin[0] as f32;
+    let top = screen.origin[1] as f32;
+    let right = left + screen.size[0] as f32;
+    let bottom = top + screen.size[1] as f32;
+    x >= left && x < right && y >= top && y < bottom
+}
+
+fn start_overlay_detection_loop(
+    app: tauri::AppHandle,
+    screen: ScreenInfo,
+    config: NativeInferenceConfig,
+    generation: u64,
+) {
+    let screen_id = screen.id.clone();
+    thread::spawn(move || loop {
+        append_app_log(
+            "backend",
+            "overlay detection loop tick",
+            Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+        );
+        let overlay_state = app.state::<OverlayState>();
+        if !overlay_refresh_is_current(&overlay_state, &screen_id, generation) {
+            append_app_log(
+                "backend",
+                "overlay detection loop exit",
+                Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+            );
+            break;
+        }
+
+        let Some(window) = app.get_window(OVERLAY_WINDOW_LABEL) else {
+            append_app_log("backend", "overlay detection loop exit: window missing", None);
+            break;
+        };
+        let _ = sync_overlay_window(&window, &screen);
+        let _ = window.set_ignore_cursor_events(true);
+        let _ = window.show();
+
+        let started = Instant::now();
+        match build_overlay_snapshot(&app, &screen, config.clone()) {
+            Ok(snapshot) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                append_app_log(
+                    "backend",
+                    "overlay detection success",
+                    Some(&format!(
+                        r#"{{"screen_id":"{}","people":{},"elapsed_ms":{elapsed_ms},"cursor":[{:.1},{:.1}],"cursor_on_screen":{}}}"#,
+                        snapshot.screen_id,
+                        snapshot.people.len(),
+                        snapshot.cursor[0],
+                        snapshot.cursor[1],
+                        snapshot.cursor_on_screen
+                    )),
+                );
+                let overlay_state = app.state::<OverlayState>();
+                emit_overlay_snapshot(&app, &overlay_state, snapshot);
+            }
+            Err(error) => {
+                append_app_log(
+                    "backend",
+                    "overlay detection error",
+                    Some(&format!(r#"{{"screen_id":"{}","error":"{}"}}"#, screen_id, error.replace('"', "'"))),
+                );
+            }
+        }
+
+        thread::sleep(Duration::from_millis(OVERLAY_DETECTION_INTERVAL_MS));
+    });
+}
+
+fn start_overlay_cursor_loop(app: tauri::AppHandle, screen: ScreenInfo, generation: u64) {
+    let screen_id = screen.id.clone();
+    append_app_log(
+        "backend",
+        "overlay cursor loop start",
+        Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+    );
+    let mut tick = 0u64;
+    thread::spawn(move || loop {
+        let overlay_state = app.state::<OverlayState>();
+        if !overlay_refresh_is_current(&overlay_state, &screen_id, generation) {
+            append_app_log(
+                "backend",
+                "overlay cursor loop exit",
+                Some(&format!(r#"{{"screen_id":"{}","generation":{generation}}}"#, screen_id)),
+            );
+            break;
+        }
+
+        let Some(window) = app.get_window(OVERLAY_WINDOW_LABEL) else {
+            append_app_log("backend", "overlay cursor loop exit: window missing", None);
+            break;
+        };
+        if let Ok(cursor) = cursor_position() {
+            let snapshot = OverlayCursorSnapshot {
+                screen_id: screen.id.clone(),
+                screen_origin: screen.origin,
+                screen_size: screen.size,
+                cursor,
+                cursor_on_screen: point_in_overlay_screen(cursor, &screen),
+            };
+            if tick % OVERLAY_CURSOR_LOG_EVERY_TICKS == 0 {
+                append_app_log(
+                    "backend",
+                    "overlay cursor",
+                    Some(&format!(
+                        r#"{{"screen_id":"{}","cursor":[{:.1},{:.1}],"cursor_on_screen":{}}}"#,
+                        snapshot.screen_id,
+                        snapshot.cursor[0],
+                        snapshot.cursor[1],
+                        snapshot.cursor_on_screen
+                    )),
+                );
+            }
+            let _ = window.emit("overlay_cursor", &snapshot);
+        } else if tick % OVERLAY_CURSOR_LOG_EVERY_TICKS == 0 {
+            append_app_log("backend", "overlay cursor error", None);
+        }
+        tick = tick.wrapping_add(1);
+
+        thread::sleep(Duration::from_millis(OVERLAY_CURSOR_INTERVAL_MS));
+    });
+}
+
+fn build_overlay_snapshot(
+    app: &tauri::AppHandle,
+    screen: &ScreenInfo,
+    config: NativeInferenceConfig,
+) -> Result<OverlaySnapshot, String> {
+    let frame = capture_screen_frame(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
+        .map_err(|error| error.to_string())?;
+    let detector_state = app.state::<LiveDetectorState>();
+    let inference = detect_with_cached_live_detector(&detector_state, config, &frame)?;
+    let mut tracked_objects = inference.objects.clone();
+    let tracking_state = app.state::<LiveTrackingState>();
+    apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)?;
+    let people = live_positions_from_objects(&tracked_objects, &inference.poses, frame.cursor);
+
+    Ok(OverlaySnapshot {
+        screen_id: screen.id.clone(),
+        screen_origin: frame.screen_origin,
+        screen_size: frame.screen_size,
+        cursor: frame.cursor,
+        cursor_on_screen: frame.cursor_on_screen,
+        people,
+    })
+}
+
 #[tauri::command]
 fn diagnostics_context(
     overlay_state: tauri::State<OverlayState>,
@@ -483,12 +757,17 @@ fn open_overlay_window(
     overlay_state: tauri::State<OverlayState>,
     window: tauri::Window,
     screen_id: String,
+    model_path: Option<String>,
+    provider: Option<String>,
+    confidence_threshold: Option<f32>,
 ) -> Result<(), String> {
     let screens = platform_list_screens(&window)?;
     let screen = screens
         .iter()
         .find(|item| item.id == screen_id)
+        .cloned()
         .ok_or_else(|| format!("screen not found: {screen_id}"))?;
+    let config = native_inference_config(provider, model_path, confidence_threshold)?;
 
     let overlay = if let Some(existing) = app.get_window(OVERLAY_WINDOW_LABEL) {
         existing
@@ -510,15 +789,14 @@ fn open_overlay_window(
         .map_err(|error| format!("failed to create overlay window: {error}"))?
     };
 
-    sync_overlay_window(&overlay, screen)?;
+    sync_overlay_window(&overlay, &screen)?;
     let _ = overlay.set_ignore_cursor_events(true);
     overlay
         .show()
         .map_err(|error| format!("failed to show overlay window: {error}"))?;
-    *overlay_state
-        .active_screen_id
-        .lock()
-        .map_err(|_| "overlay state lock poisoned".to_string())? = Some(screen.id.clone());
+    let generation = activate_overlay_refresh(&overlay_state, screen.id.clone())?;
+    start_overlay_cursor_loop(app.clone(), screen.clone(), generation);
+    start_overlay_detection_loop(app.clone(), screen, config, generation);
     Ok(())
 }
 
@@ -532,10 +810,7 @@ fn close_overlay_window(
             .hide()
             .map_err(|error| format!("failed to hide overlay window: {error}"))?;
     }
-    *overlay_state
-        .active_screen_id
-        .lock()
-        .map_err(|_| "overlay state lock poisoned".to_string())? = None;
+    deactivate_overlay_refresh(&overlay_state)?;
     Ok(())
 }
 
@@ -889,8 +1164,18 @@ fn main() {
         .manage(LiveTrackingState::default())
         .manage(LiveDetectorState::default())
         .manage(OverlayState::default())
+        .setup(|_app| {
+            let log_path = log_file_path();
+            append_app_log(
+                "backend",
+                "application startup",
+                Some(&format!(r#"{{"log_path":"{}"}}"#, log_path.display())),
+            );
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            frontend_log,
             inference_runtime_config,
             list_screens,
             live_monitor_snapshot,

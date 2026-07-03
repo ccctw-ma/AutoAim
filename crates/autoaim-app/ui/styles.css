@@ -289,6 +289,17 @@ button.ghost {
   margin-top: 18px;
 }
 
+.checkbox-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
 .monitor-canvas-wrap {
   position: relative;
   overflow: hidden;
@@ -296,6 +307,10 @@ button.ghost {
   border: 1px solid rgba(34, 211, 238, 0.24);
   border-radius: 18px;
   background: #07111f;
+}
+
+.monitor-canvas-wrap.is-hidden {
+  display: none;
 }
 
 #monitorCanvas {
@@ -846,6 +861,17 @@ button:disabled {
   gap: 8px;
 }
 
+.checkbox-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
 .monitor-canvas-wrap {
   position: relative;
   overflow: hidden;
@@ -853,6 +879,10 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 0;
   background: #111111;
+}
+
+.monitor-canvas-wrap.is-hidden {
+  display: none;
 }
 
 #monitorCanvas {

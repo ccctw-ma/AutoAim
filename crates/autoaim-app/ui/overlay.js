@@ -2,6 +2,16 @@ const tauriApi = window.__TAURI__ || {};
 const eventApi = tauriApi.event;
 const canvas = document.getElementById("overlayCanvas");
 const ctx = canvas.getContext("2d");
+let latestSnapshot = null;
+let overlayCursorLogCount = 0;
+
+function overlayLog(message, data) {
+  if (!tauriApi.tauri?.invoke) {
+    return;
+  }
+  const payload = typeof data === "undefined" ? null : JSON.stringify(data);
+  tauriApi.tauri.invoke("frontend_log", { scope: "overlay", message, payload }).catch(() => {});
+}
 
 function resizeCanvas(width, height) {
   if (canvas.width !== width || canvas.height !== height) {
@@ -15,6 +25,7 @@ function clearOverlay() {
 }
 
 function drawSnapshot(snapshot) {
+  latestSnapshot = snapshot;
   resizeCanvas(snapshot.screen_size[0], snapshot.screen_size[1]);
   clearOverlay();
 
@@ -64,8 +75,33 @@ function drawSnapshot(snapshot) {
   }
 }
 
+function drawCursorSnapshot(snapshot) {
+  const merged =
+    latestSnapshot && latestSnapshot.screen_id === snapshot.screen_id
+      ? { ...latestSnapshot, cursor: snapshot.cursor, cursor_on_screen: snapshot.cursor_on_screen }
+      : { ...snapshot, people: [] };
+  drawSnapshot(merged);
+}
+
 if (eventApi?.listen) {
   eventApi.listen("overlay_snapshot", (event) => {
+    overlayLog("overlay_snapshot", {
+      people: (event.payload.people || []).length,
+      cursor: event.payload.cursor,
+      cursor_on_screen: event.payload.cursor_on_screen,
+      screen_id: event.payload.screen_id,
+    });
     drawSnapshot(event.payload);
+  });
+  eventApi.listen("overlay_cursor", (event) => {
+    overlayCursorLogCount += 1;
+    if (overlayCursorLogCount % 60 === 1) {
+      overlayLog("overlay_cursor", {
+        cursor: event.payload.cursor,
+        cursor_on_screen: event.payload.cursor_on_screen,
+        screen_id: event.payload.screen_id,
+      });
+    }
+    drawCursorSnapshot(event.payload);
   });
 }

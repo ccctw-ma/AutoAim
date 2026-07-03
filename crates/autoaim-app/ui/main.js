@@ -16,6 +16,7 @@ const i18n = {
     stopLive: "Stop",
     showOverlay: "Overlay",
     hideOverlay: "Close overlay",
+    showPreview: "Frame preview",
     liveStopped: "Stopped",
     liveRunning: "Running",
     liveStarting: "Starting live monitor...",
@@ -232,6 +233,7 @@ const state = {
   lastCursor: [0, 0],
   lastFrame: null,
   lastSnapshotSummary: null,
+  previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") === "true",
   screens: [],
   selectedScreenId: null,
   updateCheckRunning: false,
@@ -253,6 +255,7 @@ const els = {
   stopLiveBtn: $("stopLiveBtn"),
   showOverlayBtn: $("showOverlayBtn"),
   hideOverlayBtn: $("hideOverlayBtn"),
+  previewFrameToggle: $("previewFrameToggle"),
   monitorCanvas: $("monitorCanvas"),
   liveState: $("liveState"),
   cursorReadout: $("cursorReadout"),
@@ -306,6 +309,7 @@ function applyLanguage(language) {
   document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
     node.placeholder = t(node.dataset.i18nPlaceholder);
   });
+  updatePreviewFrameVisibility();
   renderUpdateStatus();
 }
 
@@ -317,13 +321,21 @@ function setStatus(message, tone = "ready") {
   els.statusPill.dataset.tone = tone;
 }
 
-function log(message, data) {
-  if (!els.logOutput) {
+function writeFileLog(scope, message, data) {
+  if (!invoke) {
     return;
   }
-  const timestamp = new Date().toLocaleTimeString();
-  const text = typeof data === "undefined" ? message : `${message}\n${JSON.stringify(data, null, 2)}`;
-  els.logOutput.textContent = `[${timestamp}] ${text}\n\n${els.logOutput.textContent}`;
+  const payload = typeof data === "undefined" ? null : JSON.stringify(data);
+  invoke("frontend_log", { scope, message: String(message), payload }).catch(() => {});
+}
+
+function log(message, data) {
+  if (els.logOutput) {
+    const timestamp = new Date().toLocaleTimeString();
+    const text = typeof data === "undefined" ? message : `${message}\n${JSON.stringify(data, null, 2)}`;
+    els.logOutput.textContent = `[${timestamp}] ${text}\n\n${els.logOutput.textContent}`;
+  }
+  writeFileLog("ui", message, data);
 }
 
 async function copyDiagnostics() {
@@ -566,6 +578,49 @@ async function refreshScreens() {
   return screens;
 }
 
+function updatePreviewFrameVisibility() {
+  const wrap = els.monitorCanvas?.parentElement;
+  wrap?.classList.toggle("is-hidden", !state.previewFrameEnabled);
+  if (els.previewFrameToggle) {
+    els.previewFrameToggle.checked = state.previewFrameEnabled;
+  }
+}
+
+function setPreviewFrameEnabled(enabled) {
+  state.previewFrameEnabled = enabled;
+  localStorage.setItem("autoaim.previewFrame", enabled ? "true" : "false");
+  updatePreviewFrameVisibility();
+  if (!enabled && els.monitorCanvas) {
+    const ctx = els.monitorCanvas.getContext("2d");
+    ctx.clearRect(0, 0, els.monitorCanvas.width, els.monitorCanvas.height);
+  }
+}
+
+function currentInferenceOptions() {
+  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+  return {
+    modelPath: els.modelPath.value.trim(),
+    provider: els.providerSelect.value,
+    confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+  };
+}
+
+async function openOverlayForSelectedScreen() {
+  const screenId = els.screenSelect.value || state.selectedScreenId;
+  if (!screenId) {
+    throw new Error(t("noScreens"));
+  }
+
+  writeFileLog("ui", "Opening overlay", {
+    screenId,
+    options: currentInferenceOptions(),
+  });
+  await invoke("open_overlay_window", {
+    screenId,
+    ...currentInferenceOptions(),
+  });
+}
+
 async function pollLiveSnapshot(sessionId = state.liveSessionId) {
   if (state.livePolling) {
     return false;
@@ -579,12 +634,9 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
   state.livePolling = true;
   els.modelStatusReadout.textContent = t("modelLoading");
   try {
-    const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
     const snapshot = await invoke("live_monitor_snapshot", {
       screenId,
-      modelPath: els.modelPath.value.trim(),
-      provider: els.providerSelect.value,
-      confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+      ...currentInferenceOptions(),
     });
     if (sessionId !== state.liveSessionId) {
       return false;
@@ -611,7 +663,9 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
     els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
     els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
     renderPeople(people);
-    drawMonitor(snapshot, people);
+    if (state.previewFrameEnabled) {
+      drawMonitor(snapshot, people);
+    }
     return true;
   } finally {
     state.livePolling = false;
@@ -627,7 +681,7 @@ function clearLiveTimer() {
 
 function scheduleLivePoll(sessionId) {
   clearLiveTimer();
-  if (!state.liveRunning || sessionId !== state.liveSessionId) {
+  if (!state.liveRunning || sessionId !== state.liveSessionId || !state.previewFrameEnabled) {
     return;
   }
 
@@ -648,6 +702,7 @@ function scheduleLivePoll(sessionId) {
 }
 
 function stopLiveMonitor() {
+  log("Live monitor stop requested");
   state.liveRunning = false;
   state.liveSessionId += 1;
   clearLiveTimer();
@@ -874,13 +929,23 @@ on(els.startLiveBtn, "click", async () => {
     state.liveRunning = false;
     clearLiveTimer();
     state.liveSessionId += 1;
+    log("Live monitor start requested", {
+      previewFrameEnabled: state.previewFrameEnabled,
+      screenId: els.screenSelect.value || state.selectedScreenId,
+      provider: els.providerSelect.value,
+      modelPath: els.modelPath.value.trim(),
+      confidence: els.confidenceInput.value,
+    });
     const liveSessionId = state.liveSessionId;
-    const didPoll = await pollLiveSnapshot(liveSessionId);
-    if (!didPoll) {
-      throw new Error(t("liveBusy"));
-    }
+    await openOverlayForSelectedScreen();
     state.liveRunning = true;
-    scheduleLivePoll(liveSessionId);
+    if (state.previewFrameEnabled) {
+      const didPoll = await pollLiveSnapshot(liveSessionId);
+      if (!didPoll) {
+        throw new Error(t("liveBusy"));
+      }
+      scheduleLivePoll(liveSessionId);
+    }
     els.liveState.textContent = t("liveRunning");
     setStatus(t("liveStarted"), "success");
   });
@@ -892,11 +957,7 @@ on(els.stopLiveBtn, "click", () => {
 
 on(els.showOverlayBtn, "click", async () => {
   await runAction(t("showOverlay"), async () => {
-    const screenId = els.screenSelect.value || state.selectedScreenId;
-    if (!screenId) {
-      throw new Error(t("noScreens"));
-    }
-    await invoke("open_overlay_window", { screenId });
+    await openOverlayForSelectedScreen();
     setStatus(t("showOverlay"), "success");
   });
 });
@@ -906,6 +967,20 @@ on(els.hideOverlayBtn, "click", async () => {
     await invoke("close_overlay_window");
     setStatus(t("hideOverlay"), "ready");
   });
+});
+
+on(els.previewFrameToggle, "change", (event) => {
+  const enabled = Boolean(event.target.checked);
+  setPreviewFrameEnabled(enabled);
+  log("Frame preview toggled", { enabled });
+  if (!state.liveRunning) {
+    return;
+  }
+  if (enabled) {
+    scheduleLivePoll(state.liveSessionId);
+  } else {
+    clearLiveTimer();
+  }
 });
 
 on(els.validateBtn, "click", async () => {
