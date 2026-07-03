@@ -25,7 +25,7 @@ function Download-File {
         [Parameter(Mandatory = $true)][string]$OutputPath
     )
 
-    Invoke-WebRequest -Headers @{ "User-Agent" = "AutoAimReview-Windows-Updater" } -Uri $Uri -OutFile $OutputPath
+    Invoke-WebRequest -Headers @{ "User-Agent" = "AutoAimReview-Windows-Updater" } -Uri $Uri -OutFile $OutputPath -TimeoutSec 15 -UseBasicParsing
 }
 
 function Get-GitHubRelease {
@@ -41,7 +41,7 @@ function Get-GitHubRelease {
         "https://api.github.com/repos/$Repository/releases/tags/$ReleaseVersion"
     }
 
-    Invoke-RestMethod -Headers @{ "User-Agent" = "AutoAimReview-Windows-Updater" } -Uri $uri
+    Invoke-RestMethod -Headers @{ "User-Agent" = "AutoAimReview-Windows-Updater" } -Uri $uri -TimeoutSec 15
 }
 
 function Find-ReleaseAsset {

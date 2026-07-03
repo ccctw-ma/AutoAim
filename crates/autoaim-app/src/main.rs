@@ -1091,8 +1091,10 @@ fn write_events(input_path: String, output_path: String) -> Result<WriteEventsRe
 }
 
 #[tauri::command]
-fn check_updates(install_dir: Option<String>) -> Result<UpdateCommandResult, String> {
-    run_update_command(install_dir, true)
+async fn check_updates(install_dir: Option<String>) -> Result<UpdateCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_update_command(install_dir, true))
+        .await
+        .map_err(|error| format!("update check worker failed: {error}"))?
 }
 
 #[tauri::command]

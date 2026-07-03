@@ -223,6 +223,7 @@ const LIVE_PREVIEW_FRAME_INTERVAL = 15;
 const LIVE_WATCHDOG_INTERVAL_MS = 1000;
 const LIVE_STUCK_POLL_MS = 1500;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
+const UPDATE_CHECK_TIMEOUT_MS = 8000;
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
 const SKELETON_CONNECTIONS = [
   ["nose", "left_eye"],
@@ -985,7 +986,11 @@ async function checkForUpdates(options = {}) {
   }
 
   try {
-    const result = await invoke("check_updates", { installDir: null });
+    const result = await withTimeout(
+      invoke("check_updates", { installDir: null }),
+      UPDATE_CHECK_TIMEOUT_MS,
+      "check_updates",
+    );
     if (!result.success) {
       throw new Error(result.output || t("updateCheckFailed"));
     }
