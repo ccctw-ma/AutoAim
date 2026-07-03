@@ -56,7 +56,6 @@
           </div>
 
           <div class="monitor-canvas-wrap">
-            <video id="monitorVideo" autoplay muted playsinline></video>
             <canvas id="monitorCanvas" width="960" height="540"></canvas>
             <div class="monitor-overlay">
               <span id="liveState" data-i18n="liveStopped">Stopped</span>
@@ -76,20 +75,24 @@
               <span data-i18n="modelStatus">Model</span>
               <strong id="modelStatusReadout">-</strong>
             </article>
+            <article>
+              <span data-i18n="captureStatus">Capture</span>
+              <strong id="captureStatusReadout">-</strong>
+            </article>
           </div>
         </section>
 
         <section class="panel runtime-panel">
           <p class="section-kicker" data-i18n="runtimeKicker">Runtime</p>
-          <h2 data-i18n="runtimeTitle">GPU inference and updates</h2>
+          <h2 data-i18n="runtimeTitle">MoveNet pose inference and updates</h2>
 
           <div class="runtime-grid">
             <div class="field-group compact-field">
               <label for="providerSelect" data-i18n="provider">Provider</label>
               <select id="providerSelect">
+                <option value="directml">DirectML</option>
                 <option value="cuda">NVIDIA CUDA</option>
                 <option value="tensorrt">NVIDIA TensorRT</option>
-                <option value="directml">DirectML</option>
                 <option value="cpu">CPU</option>
               </select>
             </div>
@@ -103,7 +106,7 @@
           <div class="field-group">
             <label for="modelPath" data-i18n="modelPath">Model path</label>
             <div class="path-row">
-              <input id="modelPath" spellcheck="false" placeholder="models/person_head.onnx" />
+              <input id="modelPath" spellcheck="false" placeholder="Bundled: models/movenet_lightning.tflite" />
               <button id="showRuntimeBtn" class="secondary" data-i18n="showRuntime">Show config</button>
             </div>
           </div>
@@ -197,7 +200,7 @@
           </ol>
           <div class="next-box">
             <strong data-i18n="nextTitle">Next runtime modules</strong>
-            <p data-i18n="nextText">Live capture, ONNX inference, and overlay rendering are planned Rust crates and are intentionally disabled here.</p>
+            <p data-i18n="nextText">Live mode uses native Windows screen capture, cursor polling, and the Rust inference boundary.</p>
           </div>
         </section>
 

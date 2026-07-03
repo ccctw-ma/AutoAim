@@ -19,13 +19,14 @@ const i18n = {
     liveStarting: "Starting live monitor...",
     liveStarted: "Live monitor started.",
     liveStoppedStatus: "Live monitor stopped.",
-    screenShareUnavailable: "Screen capture is not available in this WebView.",
-    modelLoading: "Running Rust detector...",
-    modelLoaded: "Rust detector ready.",
+    nativeCapture: "Native Windows capture",
+    modelLoading: "Capturing screen and running detector...",
+    modelLoaded: "Native detector ready.",
     modelUnavailable: "Person detector unavailable.",
     mousePosition: "Mouse position",
     peopleCount: "People",
     modelStatus: "Model",
+    captureStatus: "Capture",
     peopleKicker: "Positions",
     peopleTitle: "Detected people",
     noPeople: "No people detected.",
@@ -42,7 +43,7 @@ const i18n = {
     preview: "Preview events",
     writeEvents: "Write events",
     runtimeKicker: "Runtime",
-    runtimeTitle: "GPU inference and updates",
+    runtimeTitle: "MoveNet pose inference and updates",
     provider: "Provider",
     threshold: "Confidence",
     modelPath: "Model path",
@@ -65,7 +66,7 @@ const i18n = {
     guide3: "Run evaluation to compute target suggestions and summary metrics.",
     guide4: "Write event JSONL when you need review-only inference results.",
     nextTitle: "Next runtime modules",
-    nextText: "Live capture is connected to screen and cursor monitoring. Person inference requires a configured model backend.",
+    nextText: "Live mode uses native Windows screen capture, cursor polling, and the Rust inference boundary.",
     consoleKicker: "Output",
     consoleTitle: "Command result",
     clear: "Clear",
@@ -109,13 +110,14 @@ const i18n = {
     liveStarting: "正在启动实时监控...",
     liveStarted: "实时监控已启动。",
     liveStoppedStatus: "实时监控已停止。",
-    screenShareUnavailable: "当前 WebView 不支持屏幕采集。",
-    modelLoading: "正在运行 Rust 检测器...",
-    modelLoaded: "Rust 检测器已就绪。",
+    nativeCapture: "Windows 原生采集",
+    modelLoading: "正在采集屏幕并运行检测器...",
+    modelLoaded: "原生检测器已就绪。",
     modelUnavailable: "人物检测模型不可用。",
     mousePosition: "鼠标位置",
     peopleCount: "人物数",
     modelStatus: "模型",
+    captureStatus: "采集",
     peopleKicker: "位置",
     peopleTitle: "识别到的人物",
     noPeople: "暂未识别到人物。",
@@ -132,7 +134,7 @@ const i18n = {
     preview: "预览事件",
     writeEvents: "写出事件",
     runtimeKicker: "运行时",
-    runtimeTitle: "GPU 推理与更新",
+    runtimeTitle: "MoveNet 姿态推理与更新",
     provider: "推理后端",
     threshold: "置信度",
     modelPath: "模型路径",
@@ -155,7 +157,7 @@ const i18n = {
     guide3: "执行评估，计算目标建议和汇总指标。",
     guide4: "需要审阅用推理结果时，写出事件 JSONL。",
     nextTitle: "后续运行时模块",
-    nextText: "实时功能已接入屏幕和鼠标监控；人物推理需要配置模型后端。",
+    nextText: "实时模式使用 Windows 原生屏幕采集、鼠标轮询和 Rust 推理边界。",
     consoleKicker: "输出",
     consoleTitle: "命令结果",
     clear: "清空",
@@ -188,9 +190,9 @@ const i18n = {
 const state = {
   language: localStorage.getItem("autoaim.language") || "en",
   liveTimer: null,
-  liveStream: null,
   detectedPeople: [],
   lastCursor: [0, 0],
+  lastFrame: null,
   screens: [],
   selectedScreenId: null,
 };
@@ -205,11 +207,11 @@ const els = {
   startLiveBtn: $("startLiveBtn"),
   stopLiveBtn: $("stopLiveBtn"),
   monitorCanvas: $("monitorCanvas"),
-  monitorVideo: $("monitorVideo"),
   liveState: $("liveState"),
   cursorReadout: $("cursorReadout"),
   peopleReadout: $("peopleReadout"),
   modelStatusReadout: $("modelStatusReadout"),
+  captureStatusReadout: $("captureStatusReadout"),
   peopleList: $("peopleList"),
   inputPath: $("inputPath"),
   outputPath: $("outputPath"),
@@ -303,18 +305,39 @@ function setBusy(isBusy) {
   });
 }
 
+function decodeRgbaBase64(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8ClampedArray(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function drawNativeFrame(ctx, canvas, frame) {
+  if (!frame?.rgba_base64) {
+    ctx.fillStyle = "#07111f";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+
+  const [frameWidth, frameHeight] = frame.frame_size;
+  const rgba = decodeRgbaBase64(frame.rgba_base64);
+  const imageData = new ImageData(rgba, frameWidth, frameHeight);
+  const bitmapCanvas = document.createElement("canvas");
+  bitmapCanvas.width = frameWidth;
+  bitmapCanvas.height = frameHeight;
+  bitmapCanvas.getContext("2d").putImageData(imageData, 0, 0);
+  ctx.drawImage(bitmapCanvas, 0, 0, canvas.width, canvas.height);
+}
+
 function drawMonitor(snapshot, people = state.detectedPeople) {
   const canvas = els.monitorCanvas;
   const ctx = canvas.getContext("2d");
   const width = canvas.width;
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
-  if (els.monitorVideo.srcObject && els.monitorVideo.readyState >= 2) {
-    ctx.drawImage(els.monitorVideo, 0, 0, width, height);
-  } else {
-    ctx.fillStyle = "#07111f";
-    ctx.fillRect(0, 0, width, height);
-  }
+  drawNativeFrame(ctx, canvas, snapshot.frame);
 
   const grid = 48;
   ctx.strokeStyle = "rgba(148, 163, 184, 0.13)";
@@ -332,12 +355,12 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
     ctx.stroke();
   }
 
-  const screen = state.screens.find((item) => item.id === snapshot.screen_id) || state.screens[0];
-  if (!screen) {
+  const frame = snapshot.frame;
+  if (!frame) {
     return;
   }
-  const [originX, originY] = screen.origin;
-  const [screenW, screenH] = screen.size;
+  const [originX, originY] = frame.screen_origin;
+  const [screenW, screenH] = frame.screen_size;
   const scaleX = width / screenW;
   const scaleY = height / screenH;
 
@@ -368,6 +391,20 @@ function drawMonitor(snapshot, people = state.detectedPeople) {
     ctx.beginPath();
     ctx.arc(headX, headY, 5, 0, Math.PI * 2);
     ctx.fill();
+
+    if (Array.isArray(person.keypoints)) {
+      ctx.fillStyle = "#a7f3d0";
+      person.keypoints
+        .filter((keypoint) => keypoint.score >= 0.2)
+        .forEach((keypoint) => {
+          const keypointX = (keypoint.point[0] - originX) * scaleX;
+          const keypointY = (keypoint.point[1] - originY) * scaleY;
+          ctx.beginPath();
+          ctx.arc(keypointX, keypointY, 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      ctx.fillStyle = "#f97316";
+    }
   });
 }
 
@@ -384,40 +421,23 @@ function renderPeople(people) {
   people.forEach((person) => {
     const item = document.createElement("article");
     item.className = "person-row";
+    const keypoints = Array.isArray(person.keypoints)
+      ? person.keypoints
+          .filter((keypoint) => keypoint.score >= 0.2)
+          .slice(0, 6)
+          .map((keypoint) => `${keypoint.name} [${keypoint.point.map((value) => value.toFixed(0)).join(", ")}]`)
+          .join("; ")
+      : "";
     item.innerHTML = `
-      <strong>#${person.object_index}</strong>
+      <strong>#${person.object_index} ${person.class_name || "person"}</strong>
       <span>bbox [${person.bbox.map((value) => value.toFixed(0)).join(", ")}]</span>
       <span>head [${person.head_point.map((value) => value.toFixed(0)).join(", ")}]</span>
       <span>dx ${person.dx.toFixed(1)} / dy ${person.dy.toFixed(1)}</span>
+      <span>confidence ${(person.confidence * 100).toFixed(1)}%</span>
+      <span>${keypoints || "keypoints -"}</span>
     `;
     els.peopleList.appendChild(item);
   });
-}
-
-async function detectPeople(snapshot) {
-  if (!els.monitorVideo.srcObject || els.monitorVideo.readyState < 2) {
-    return [];
-  }
-  const screen = state.screens.find((item) => item.id === snapshot.screen_id) || state.screens[0];
-  if (!screen) {
-    return [];
-  }
-  els.modelStatusReadout.textContent = t("modelLoading");
-  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
-  const result = await invoke("detect_live_frame", {
-    request: {
-      screenId: snapshot.screen_id,
-      screenOrigin: screen.origin,
-      screenSize: screen.size,
-      frameSize: [els.monitorVideo.videoWidth || els.monitorCanvas.width, els.monitorVideo.videoHeight || els.monitorCanvas.height],
-      cursor: snapshot.cursor,
-      modelPath: els.modelPath.value.trim(),
-      provider: els.providerSelect.value,
-      confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
-    },
-  });
-  els.modelStatusReadout.textContent = result.model_status || t("modelLoaded");
-  return result.people;
 }
 
 async function refreshScreens() {
@@ -444,24 +464,22 @@ async function pollLiveSnapshot() {
   if (!screenId) {
     return;
   }
+  els.modelStatusReadout.textContent = t("modelLoading");
+  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
   const snapshot = await invoke("live_monitor_snapshot", {
     screenId,
     modelPath: els.modelPath.value.trim(),
     provider: els.providerSelect.value,
+    confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
   });
   state.lastCursor = snapshot.cursor;
-  let people = state.detectedPeople;
-  try {
-    people = await detectPeople(snapshot);
-    state.detectedPeople = people;
-  } catch (error) {
-    els.modelStatusReadout.textContent = error?.message || t("modelUnavailable");
-  }
+  state.lastFrame = snapshot.frame;
+  const people = snapshot.people || [];
+  state.detectedPeople = people;
   els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
   els.peopleReadout.textContent = people.length;
-  if (!people.length) {
-    els.modelStatusReadout.textContent = snapshot.model_status;
-  }
+  els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
+  els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
   renderPeople(people);
   drawMonitor(snapshot, people);
 }
@@ -471,37 +489,11 @@ function stopLiveMonitor() {
     clearInterval(state.liveTimer);
     state.liveTimer = null;
   }
-  if (state.liveStream) {
-    state.liveStream.getTracks().forEach((track) => track.stop());
-    state.liveStream = null;
-  }
-  els.monitorVideo.srcObject = null;
   state.detectedPeople = [];
+  state.lastFrame = null;
   renderPeople([]);
   els.liveState.textContent = t("liveStopped");
   setStatus(t("liveStoppedStatus"), "ready");
-}
-
-async function startScreenCapture() {
-  if (!navigator.mediaDevices?.getDisplayMedia) {
-    throw new Error(t("screenShareUnavailable"));
-  }
-  if (state.liveStream) {
-    state.liveStream.getTracks().forEach((track) => track.stop());
-  }
-  const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: {
-      frameRate: 30,
-    },
-    audio: false,
-  });
-  state.liveStream = stream;
-  els.monitorVideo.srcObject = stream;
-  await els.monitorVideo.play();
-  const [track] = stream.getVideoTracks();
-  track.addEventListener("ended", () => {
-    stopLiveMonitor();
-  });
 }
 
 function updateMetrics(summary) {
@@ -573,7 +565,6 @@ els.startLiveBtn.addEventListener("click", async () => {
     if (!state.screens.length) {
       await refreshScreens();
     }
-    await startScreenCapture();
     await pollLiveSnapshot();
     if (state.liveTimer) {
       clearInterval(state.liveTimer);

@@ -31,9 +31,12 @@ __pycache__/
 data/
 datasets/
 runs/
-models/
+models/*
+!models/
+!models/movenet_lightning.tflite
 .e2e-output/
 *.onnx
+!models/movenet_lightning.onnx
 *.engine
 *.pt
 .env

@@ -11,15 +11,19 @@ name = "AutoAimReview"
 path = "src/main.rs"
 
 [dependencies]
+autoaim-capture = { path = "../autoaim-capture" }
 autoaim-core = { path = "../autoaim-core" }
+autoaim-infer = { path = "../autoaim-infer" }
 autoaim-ipc = { path = "../autoaim-ipc" }
 autoaim-runtime = { path = "../autoaim-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
-
 [build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-build.workspace = true
+
+[features]
+default = ["directml"]
+directml = ["autoaim-infer/directml"]

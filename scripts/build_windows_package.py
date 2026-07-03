@@ -268,6 +268,7 @@ def build_package(args: argparse.Namespace) -> None:
     windows_dir = package_root / "windows"
     assets_dir = package_root / "assets"
     examples_dir = package_root / "examples"
+    models_dir = package_root / "models"
 
     if package_root.exists():
         shutil.rmtree(package_root)
@@ -276,6 +277,7 @@ def build_package(args: argparse.Namespace) -> None:
     windows_dir.mkdir(parents=True)
     assets_dir.mkdir(parents=True)
     examples_dir.mkdir(parents=True)
+    models_dir.mkdir(parents=True)
 
     if args.cli_exe_path or args.exe_path:
         cli_source = Path(args.cli_exe_path or args.exe_path).resolve()
@@ -299,10 +301,21 @@ def build_package(args: argparse.Namespace) -> None:
 
     copy_file(app_source, package_root / "AutoAimReview.exe")
     copy_file(cli_source, bin_dir / "autoaim.exe")
+    for dll_source in sorted(app_source.parent.glob("*.dll")):
+        if dll_source.name.lower().startswith(("directml", "onnxruntime")):
+            copy_file(dll_source, package_root / dll_source.name)
     copy_file(repo / "windows" / "install.ps1", windows_dir / "install.ps1")
     copy_file(repo / "windows" / "update.ps1", windows_dir / "update.ps1")
     copy_file(repo / "assets" / "logo.svg", assets_dir / "logo.svg")
     write_logo_ico(assets_dir / "logo.ico")
+    copy_file(
+        repo / "models" / "movenet_lightning.tflite",
+        models_dir / "movenet_lightning.tflite",
+    )
+    copy_file(
+        repo / "models" / "movenet_lightning.onnx",
+        models_dir / "movenet_lightning.onnx",
+    )
     copy_file(repo / "examples" / "sample_frames.jsonl", examples_dir / "sample_frames.jsonl")
     copy_file(repo / "README.md", package_root / "README.md")
     copy_file(repo / "LICENSE", package_root / "LICENSE")

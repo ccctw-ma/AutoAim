@@ -3,21 +3,28 @@
     windows_subsystem = "windows"
 )]
 
+use autoaim_capture::{capture_screen_frame, CapturedFramePreview};
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
     Point, TargetScorer, ValidationDiagnostic,
 };
+use autoaim_infer::{
+    InferenceConfig as NativeInferenceConfig, NativeInferenceProvider, NativePersonDetector,
+    PersonDetector, PoseEstimate, PoseKeypoint,
+};
 use autoaim_ipc::{
     AssistSuggestionEvent, InferenceProvider, InferenceResult, InferenceRuntimeConfig,
 };
-use autoaim_runtime::{
-    mock_native_detections, JsonlEventWriter, LiveDetectionInput, ReviewPipeline,
-};
-use serde::{Deserialize, Serialize};
+use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
+use serde::Serialize;
 use std::{
+    env,
     path::{Path, PathBuf},
     process::Command,
 };
+
+const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
+const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
 
 #[derive(Debug, Serialize)]
 struct AppInfo {
@@ -84,8 +91,10 @@ struct ScreenInfo {
 #[derive(Debug, Serialize)]
 struct LivePersonPosition {
     object_index: usize,
+    class_name: String,
     bbox: [f32; 4],
     head_point: Point,
+    keypoints: Vec<PoseKeypoint>,
     confidence: f32,
     track_id: Option<u64>,
     dx: f32,
@@ -95,32 +104,12 @@ struct LivePersonPosition {
 #[derive(Debug, Serialize)]
 struct LiveMonitorSnapshot {
     screen_id: String,
+    frame: CapturedFramePreview,
     cursor: Point,
     cursor_on_screen: bool,
     people: Vec<LivePersonPosition>,
     model_status: String,
     capture_status: String,
-    review_only: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LiveDetectionRequest {
-    screen_id: String,
-    screen_origin: [i32; 2],
-    screen_size: [u32; 2],
-    frame_size: [u32; 2],
-    cursor: Point,
-    model_path: Option<String>,
-    provider: Option<String>,
-    confidence_threshold: Option<f32>,
-}
-
-#[derive(Debug, Serialize)]
-struct LiveDetectionResult {
-    screen_id: String,
-    people: Vec<LivePersonPosition>,
-    model_status: String,
     provider: String,
     review_only: bool,
 }
@@ -143,7 +132,7 @@ fn inference_runtime_config(
     confidence_threshold: Option<f32>,
 ) -> Result<InferenceRuntimeConfig, String> {
     let provider = match provider
-        .unwrap_or_else(|| "cuda".to_string())
+        .unwrap_or_else(|| "directml".to_string())
         .to_ascii_lowercase()
         .as_str()
     {
@@ -156,7 +145,7 @@ fn inference_runtime_config(
 
     Ok(InferenceRuntimeConfig::new(
         provider,
-        model_path.filter(|value| !value.trim().is_empty()),
+        resolve_model_path(model_path, provider == InferenceProvider::DirectMl),
         device_id,
         confidence_threshold.unwrap_or(0.25),
     ))
@@ -173,6 +162,7 @@ fn live_monitor_snapshot(
     screen_id: String,
     model_path: Option<String>,
     provider: Option<String>,
+    confidence_threshold: Option<f32>,
 ) -> Result<LiveMonitorSnapshot, String> {
     let screens = platform_list_screens(&window)?;
     let screen = screens
@@ -181,124 +171,122 @@ fn live_monitor_snapshot(
         .or_else(|| screens.iter().find(|item| item.primary))
         .or_else(|| screens.first())
         .ok_or_else(|| "no screens found".to_string())?;
-    let cursor = platform_cursor_position()?;
-    let cursor_on_screen = point_in_screen(cursor, screen);
-    let model_configured = model_path
-        .as_ref()
-        .map(|value| !value.trim().is_empty() && Path::new(value).is_file())
-        .unwrap_or(false);
-    let provider = provider.unwrap_or_else(|| "cuda".to_string());
-    let model_status = if model_configured {
-        format!(
-            "model configured for {provider}; live capture/inference backend is pending integration"
-        )
-    } else {
-        "no model configured; person list is empty".to_string()
-    };
+    let frame = capture_screen_frame(screen.origin, screen.size, [960, 540])
+        .map_err(|error| error.to_string())?;
+    let config = native_inference_config(provider, model_path, confidence_threshold)?;
+    let detector = NativePersonDetector::from_config(config).map_err(|error| error.to_string())?;
+    let inference = detector.detect(&frame).map_err(|error| error.to_string())?;
+    let people = live_positions_from_objects(&inference.objects, &inference.poses, frame.cursor);
+    let capture_status = format!(
+        "native Windows API capture: {}x{} preview from {}x{} screen",
+        frame.frame_size[0], frame.frame_size[1], frame.screen_size[0], frame.screen_size[1]
+    );
 
     Ok(LiveMonitorSnapshot {
         screen_id: screen.id.clone(),
-        cursor,
-        cursor_on_screen,
-        people: Vec::new(),
-        model_status,
-        capture_status:
-            "screen video is provided by the system picker; backend reports cursor position"
-                .to_string(),
-        review_only: true,
-    })
-}
-
-#[tauri::command]
-fn detect_live_frame(request: LiveDetectionRequest) -> Result<LiveDetectionResult, String> {
-    let provider = request
-        .provider
-        .clone()
-        .unwrap_or_else(|| "cuda".to_string());
-    let threshold = request.confidence_threshold.unwrap_or(0.25).clamp(0.0, 1.0);
-    let model_path = request
-        .model_path
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty());
-    let model_configured = model_path
-        .map(|value| Path::new(value).is_file())
-        .unwrap_or(false);
-
-    let (people, model_status) = if model_configured {
-        (
-            mock_native_detector(&request, threshold),
-            format!(
-                "native {provider} detector interface ready; ONNX/TensorRT execution backend pending model binding"
-            ),
-        )
-    } else {
-        (
-            mock_native_detector(&request, threshold),
-            "mock Rust detector active; configure an ONNX/TensorRT model for native GPU inference"
-                .to_string(),
-        )
-    };
-
-    Ok(LiveDetectionResult {
-        screen_id: request.screen_id,
+        frame: CapturedFramePreview::from(&frame),
+        cursor: frame.cursor,
+        cursor_on_screen: frame.cursor_on_screen,
         people,
-        model_status,
-        provider,
+        model_status: inference.model_status,
+        capture_status,
+        provider: inference.provider.as_str().to_string(),
         review_only: true,
     })
 }
 
-fn mock_native_detector(request: &LiveDetectionRequest, threshold: f32) -> Vec<LivePersonPosition> {
-    let input = LiveDetectionInput {
-        screen_origin: request.screen_origin,
-        screen_size: request.screen_size,
-        frame_size: request.frame_size,
-        cursor: request.cursor,
-        confidence_threshold: threshold,
-    };
+fn native_inference_config(
+    provider: Option<String>,
+    model_path: Option<String>,
+    confidence_threshold: Option<f32>,
+) -> Result<NativeInferenceConfig, String> {
+    let provider_name = provider.unwrap_or_else(|| "directml".to_string());
+    let provider = NativeInferenceProvider::from_name(&provider_name)
+        .ok_or_else(|| format!("unsupported inference provider: {provider_name}"))?;
 
-    mock_native_detections(&input)
-        .into_iter()
-        .map(|detection| LivePersonPosition {
-            object_index: detection.object_index,
-            bbox: detection.bbox,
-            head_point: detection.head_point,
-            confidence: detection.confidence,
-            track_id: detection.track_id,
-            dx: detection.dx,
-            dy: detection.dy,
-        })
-        .collect()
+    Ok(NativeInferenceConfig::new(
+        provider,
+        resolve_model_path(model_path, provider == NativeInferenceProvider::DirectMl),
+        confidence_threshold.unwrap_or(0.25),
+    ))
 }
 
-fn point_in_screen(point: Point, screen: &ScreenInfo) -> bool {
-    let x = point[0];
-    let y = point[1];
-    let left = screen.origin[0] as f32;
-    let top = screen.origin[1] as f32;
-    let right = left + screen.size[0] as f32;
-    let bottom = top + screen.size[1] as f32;
-    x >= left && x < right && y >= top && y < bottom
-}
+fn resolve_model_path(model_path: Option<String>, prefer_onnx: bool) -> Option<String> {
+    let explicit = model_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-#[cfg(target_os = "windows")]
-fn platform_cursor_position() -> Result<Point, String> {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-    let mut point = POINT { x: 0, y: 0 };
-    let ok = unsafe { GetCursorPos(&mut point) };
-    if ok == 0 {
-        return Err("GetCursorPos failed".to_string());
+    if let Some(value) = explicit {
+        return resolve_existing_model_path(value)
+            .or_else(|| Some(PathBuf::from(value)))
+            .map(path_to_string);
     }
 
-    Ok([point.x as f32, point.y as f32])
+    let candidates = if prefer_onnx {
+        [BUNDLED_MOVENET_ONNX_MODEL, BUNDLED_MOVENET_TFLITE_MODEL]
+    } else {
+        [BUNDLED_MOVENET_TFLITE_MODEL, BUNDLED_MOVENET_ONNX_MODEL]
+    };
+
+    candidates
+        .iter()
+        .find_map(|candidate| resolve_existing_model_path(candidate))
+        .map(path_to_string)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn platform_cursor_position() -> Result<Point, String> {
-    Err("live cursor monitoring is available only on Windows".to_string())
+fn resolve_existing_model_path(value: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(value);
+    if path.is_file() {
+        return Some(path);
+    }
+
+    let mut candidates = Vec::new();
+    if path.is_relative() {
+        if let Ok(exe_path) = env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                candidates.push(exe_dir.join(&path));
+            }
+        }
+        if let Ok(current_dir) = env::current_dir() {
+            candidates.push(current_dir.join(&path));
+        }
+    }
+
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+fn path_to_string(path: PathBuf) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn live_positions_from_objects(
+    objects: &[DetectionObject],
+    poses: &[PoseEstimate],
+    cursor: Point,
+) -> Vec<LivePersonPosition> {
+    objects
+        .iter()
+        .enumerate()
+        .map(|(object_index, object)| {
+            let head_point = object.aim_point();
+            let keypoints = poses
+                .get(object_index)
+                .map(|pose| pose.keypoints.clone())
+                .unwrap_or_default();
+            LivePersonPosition {
+                object_index,
+                class_name: object.class_name.clone(),
+                bbox: object.bbox,
+                head_point,
+                keypoints,
+                confidence: object.confidence,
+                track_id: object.track_id,
+                dx: head_point[0] - cursor[0],
+                dy: head_point[1] - cursor[1],
+            }
+        })
+        .collect()
 }
 
 fn platform_list_screens(window: &tauri::Window) -> Result<Vec<ScreenInfo>, String> {
@@ -607,7 +595,6 @@ fn main() {
             inference_runtime_config,
             list_screens,
             live_monitor_snapshot,
-            detect_live_frame,
             validate_dataset,
             evaluate_dataset,
             preview_events,

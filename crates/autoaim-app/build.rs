@@ -7,6 +7,7 @@ fn write_icon() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let icon_dir = std::path::Path::new(&manifest_dir).join("icons");
     let icon_path = icon_dir.join("icon.ico");
+    let icon_png_path = icon_dir.join("icon.png");
     std::fs::create_dir_all(&icon_dir).expect("create icon dir");
 
     let size = 64usize;
@@ -33,10 +34,10 @@ fn write_icon() {
                 (r, g, b) = (34, 211, 238);
             }
 
-            let left_stem = (x as f32 - (22.0 + y as f32 * 0.22)).abs() <= 2.0
-                && (18..=47).contains(&y);
-            let right_stem = (x as f32 - (42.0 - y as f32 * 0.22)).abs() <= 2.0
-                && (18..=47).contains(&y);
+            let left_stem =
+                (x as f32 - (22.0 + y as f32 * 0.22)).abs() <= 2.0 && (18..=47).contains(&y);
+            let right_stem =
+                (x as f32 - (42.0 - y as f32 * 0.22)).abs() <= 2.0 && (18..=47).contains(&y);
             let crossbar = (35..=39).contains(&y) && (26..=38).contains(&x);
             if left_stem || right_stem || crossbar {
                 (r, g, b) = (248, 250, 252);
@@ -46,14 +47,18 @@ fn write_icon() {
                 (r, g, b) = (249, 115, 22);
             }
 
-            pixels.extend_from_slice(&[b, g, r, a]);
+            pixels.extend_from_slice(&[r, g, b, a]);
         }
     }
+
+    write_png(&icon_png_path, size as u32, size as u32, &pixels);
 
     let mut xor_bitmap = Vec::with_capacity(size * size * 4);
     for y in (0..size).rev() {
         let row_start = y * size * 4;
-        xor_bitmap.extend_from_slice(&pixels[row_start..row_start + size * 4]);
+        for pixel in pixels[row_start..row_start + size * 4].chunks_exact(4) {
+            xor_bitmap.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
     }
 
     let and_mask = vec![0u8; (size / 8) * size];
@@ -84,4 +89,9 @@ fn write_icon() {
     data.extend_from_slice(&and_mask);
 
     std::fs::write(icon_path, data).expect("write generated icon");
+}
+
+fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) {
+    image::save_buffer(path, rgba, width, height, image::ColorType::Rgba8)
+        .expect("write generated png icon");
 }

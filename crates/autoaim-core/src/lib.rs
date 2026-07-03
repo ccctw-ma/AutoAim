@@ -195,8 +195,7 @@ impl TargetScorer {
         let distance = target.distance_to_cursor(cursor).min(self.max_distance_px);
         let distance_score = 1.0 - distance / self.max_distance_px;
         let confidence_score = target.confidence.clamp(0.0, 1.0);
-        let stability_score = if previous_track_id.is_some()
-            && target.track_id == previous_track_id
+        let stability_score = if previous_track_id.is_some() && target.track_id == previous_track_id
         {
             1.0
         } else {
@@ -231,11 +230,7 @@ pub fn choose_target(
                 scorer.score(object, frame.input.cursor, previous_track_id),
             )
         })
-        .max_by(|left, right| {
-            left.2
-                .partial_cmp(&right.2)
-                .unwrap_or(Ordering::Equal)
-        })
+        .max_by(|left, right| left.2.partial_cmp(&right.2).unwrap_or(Ordering::Equal))
     else {
         return AimSuggestion {
             frame_id: frame.frame_id,
@@ -338,7 +333,8 @@ pub fn validate_records(records: &[FrameRecord]) -> Vec<ValidationDiagnostic> {
         if record.session_id.is_none() && record.scene_id.is_none() {
             diagnostics.push(ValidationDiagnostic {
                 frame_id: Some(record.frame_id),
-                message: "frame should include session_id or scene_id for grouped splits".to_string(),
+                message: "frame should include session_id or scene_id for grouped splits"
+                    .to_string(),
             });
         }
 

@@ -80,7 +80,8 @@ jobs:
       - name: Run Rust tests
         shell: pwsh
         run: |
-          cargo test -p autoaim-core -p autoaim-ipc -p autoaim-runtime -p autoaim-cli
+          cargo test -p autoaim-core -p autoaim-ipc -p autoaim-runtime -p autoaim-capture -p autoaim-infer -p autoaim-cli
+          cargo check -p autoaim-infer --features directml
 
       - name: Run Rust CLI E2E
         shell: pwsh

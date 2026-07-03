@@ -293,14 +293,6 @@ button.ghost {
   aspect-ratio: 16 / 9;
 }
 
-#monitorVideo {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-
 .monitor-overlay {
   position: absolute;
   top: 12px;
@@ -320,7 +312,7 @@ button.ghost {
 
 .live-readouts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-top: 14px;
 }
@@ -404,7 +396,7 @@ button.ghost {
 
 .person-row {
   display: grid;
-  grid-template-columns: 46px repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(74px, 0.7fr) repeat(4, minmax(0, 1fr));
   gap: 10px;
   align-items: center;
   padding: 12px;
@@ -413,13 +405,17 @@ button.ghost {
   background: rgba(2, 6, 23, 0.38);
 }
 
+.person-row span:last-child {
+  grid-column: 1 / -1;
+}
+
 .person-row span,
 .empty-people {
   overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .compact-notice {
