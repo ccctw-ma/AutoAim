@@ -26,8 +26,8 @@ use std::{
     env,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -147,10 +147,29 @@ struct LiveMonitorSnapshot {
     cursor: Point,
     cursor_on_screen: bool,
     people: Vec<LivePersonPosition>,
+    latency: LiveLatency,
+    telemetry: SystemTelemetry,
     model_status: String,
     capture_status: String,
     provider: String,
     review_only: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LiveLatency {
+    capture_ms: u128,
+    detect_ms: u128,
+    tracking_ms: u128,
+    total_ms: u128,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct SystemTelemetry {
+    cpu_usage_percent: Option<f32>,
+    gpu_usage_percent: Option<f32>,
+    gpu_memory_used_mb: Option<u64>,
+    gpu_memory_total_mb: Option<u64>,
+    gpu_status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -236,9 +255,51 @@ struct LiveCaptureState {
     capturer: Mutex<Option<ScreenCapturer>>,
 }
 
+#[derive(Clone)]
+struct LiveSnapshotInFlightGuard {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl Drop for LiveSnapshotInFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Default)]
+struct LiveSnapshotState {
+    in_flight: Arc<AtomicBool>,
+}
+
 #[derive(Default)]
 struct LiveDatasetState {
     recorder: Mutex<Option<LiveDatasetRecorder>>,
+}
+
+#[derive(Default)]
+struct SystemTelemetryState {
+    cache: Mutex<SystemTelemetryCache>,
+}
+
+#[derive(Default)]
+struct SystemTelemetryCache {
+    cpu_sample: Option<CpuTimesSample>,
+    gpu_sample: Option<GpuTelemetrySample>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CpuTimesSample {
+    idle: u64,
+    total: u64,
+}
+
+#[derive(Clone, Debug)]
+struct GpuTelemetrySample {
+    sampled_at: Instant,
+    usage_percent: Option<f32>,
+    memory_used_mb: Option<u64>,
+    memory_total_mb: Option<u64>,
+    status: String,
 }
 
 struct LiveDatasetRecorder {
@@ -313,6 +374,12 @@ async fn live_monitor_snapshot(
     confidence_threshold: Option<f32>,
     include_frame: Option<bool>,
 ) -> Result<LiveMonitorSnapshot, String> {
+    let in_flight = app.state::<LiveSnapshotState>().in_flight.clone();
+    if in_flight.swap(true, Ordering::AcqRel) {
+        return Err("live snapshot busy".to_string());
+    }
+    let _in_flight_guard = LiveSnapshotInFlightGuard { in_flight };
+
     let screens = platform_list_screens(&window)?;
     let screen = screens
         .iter()
@@ -329,6 +396,7 @@ async fn live_monitor_snapshot(
         let capture_state = app.state::<LiveCaptureState>();
         let dataset_state = app.state::<LiveDatasetState>();
         let overlay_state = app.state::<OverlayState>();
+        let telemetry_state = app.state::<SystemTelemetryState>();
         build_live_monitor_snapshot(
             &app,
             &tracking_state,
@@ -336,6 +404,7 @@ async fn live_monitor_snapshot(
             &capture_state,
             &dataset_state,
             &overlay_state,
+            &telemetry_state,
             &screen,
             config,
             include_frame.unwrap_or(true),
@@ -352,6 +421,7 @@ fn build_live_monitor_snapshot(
     capture_state: &LiveCaptureState,
     dataset_state: &LiveDatasetState,
     overlay_state: &OverlayState,
+    telemetry_state: &SystemTelemetryState,
     screen: &ScreenInfo,
     config: NativeInferenceConfig,
     include_frame: bool,
@@ -429,6 +499,13 @@ fn build_live_monitor_snapshot(
         None
     };
     let total_ms = total_started.elapsed().as_millis();
+    let latency = LiveLatency {
+        capture_ms,
+        detect_ms,
+        tracking_ms,
+        total_ms,
+    };
+    let telemetry = sample_system_telemetry(telemetry_state);
     if should_log_live_snapshot(sequence, total_ms) {
         let keypoints = people
             .iter()
@@ -479,6 +556,8 @@ fn build_live_monitor_snapshot(
         cursor: frame.cursor,
         cursor_on_screen: frame.cursor_on_screen,
         people,
+        latency,
+        telemetry,
         model_status: inference.model_status,
         capture_status,
         provider: inference.provider.as_str().to_string(),
@@ -822,6 +901,154 @@ fn json_escape(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+fn sample_system_telemetry(state: &SystemTelemetryState) -> SystemTelemetry {
+    let mut cache = match state.cache.lock() {
+        Ok(cache) => cache,
+        Err(_) => {
+            return SystemTelemetry {
+                gpu_status: "telemetry lock poisoned".to_string(),
+                ..SystemTelemetry::default()
+            };
+        }
+    };
+
+    let cpu_usage_percent = sample_cpu_usage_percent(&mut cache.cpu_sample);
+    let gpu_sample = sample_gpu_telemetry(&mut cache.gpu_sample);
+    SystemTelemetry {
+        cpu_usage_percent,
+        gpu_usage_percent: gpu_sample.usage_percent,
+        gpu_memory_used_mb: gpu_sample.memory_used_mb,
+        gpu_memory_total_mb: gpu_sample.memory_total_mb,
+        gpu_status: gpu_sample.status,
+    }
+}
+
+fn sample_cpu_usage_percent(previous: &mut Option<CpuTimesSample>) -> Option<f32> {
+    let current = sample_cpu_times()?;
+    let usage = previous.and_then(|last| {
+        let idle_delta = current.idle.saturating_sub(last.idle);
+        let total_delta = current.total.saturating_sub(last.total);
+        if total_delta == 0 {
+            None
+        } else {
+            Some(((total_delta - idle_delta) as f32 * 100.0 / total_delta as f32).clamp(0.0, 100.0))
+        }
+    });
+    *previous = Some(current);
+    usage
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct KernelFileTime {
+    low_date_time: u32,
+    high_date_time: u32,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetSystemTimes(
+        idle_time: *mut KernelFileTime,
+        kernel_time: *mut KernelFileTime,
+        user_time: *mut KernelFileTime,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn sample_cpu_times() -> Option<CpuTimesSample> {
+    let mut idle = KernelFileTime {
+        low_date_time: 0,
+        high_date_time: 0,
+    };
+    let mut kernel = KernelFileTime {
+        low_date_time: 0,
+        high_date_time: 0,
+    };
+    let mut user = KernelFileTime {
+        low_date_time: 0,
+        high_date_time: 0,
+    };
+    let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+    if ok == 0 {
+        return None;
+    }
+    let idle = filetime_to_u64(idle);
+    let kernel = filetime_to_u64(kernel);
+    let user = filetime_to_u64(user);
+    Some(CpuTimesSample {
+        idle,
+        total: kernel.saturating_add(user),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn filetime_to_u64(value: KernelFileTime) -> u64 {
+    ((value.high_date_time as u64) << 32) | value.low_date_time as u64
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sample_cpu_times() -> Option<CpuTimesSample> {
+    None
+}
+
+fn sample_gpu_telemetry(previous: &mut Option<GpuTelemetrySample>) -> GpuTelemetrySample {
+    if let Some(sample) = previous.as_ref() {
+        if sample.sampled_at.elapsed() < Duration::from_secs(2) {
+            return sample.clone();
+        }
+    }
+
+    let sample = query_gpu_telemetry().unwrap_or_else(|status| GpuTelemetrySample {
+        sampled_at: Instant::now(),
+        usage_percent: None,
+        memory_used_mb: None,
+        memory_total_mb: None,
+        status,
+    });
+    *previous = Some(sample.clone());
+    sample
+}
+
+#[cfg(target_os = "windows")]
+fn query_gpu_telemetry() -> Result<GpuTelemetrySample, String> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .map_err(|error| format!("nvidia-smi unavailable: {error}"))?;
+    if !output.status.success() {
+        return Err("nvidia-smi failed".to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(line) = text
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    else {
+        return Err("nvidia-smi returned empty output".to_string());
+    };
+    let parts = line.split(',').map(str::trim).collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return Err(format!("unexpected nvidia-smi output: {line}"));
+    }
+    Ok(GpuTelemetrySample {
+        sampled_at: Instant::now(),
+        usage_percent: parts[0].parse::<f32>().ok(),
+        memory_used_mb: parts[1].parse::<u64>().ok(),
+        memory_total_mb: parts[2].parse::<u64>().ok(),
+        status: "nvidia-smi".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn query_gpu_telemetry() -> Result<GpuTelemetrySample, String> {
+    Err("GPU telemetry is available only on Windows".to_string())
 }
 
 #[tauri::command]
@@ -1604,7 +1831,9 @@ fn main() {
         .manage(LiveTrackingState::default())
         .manage(LiveDetectorState::default())
         .manage(LiveCaptureState::default())
+        .manage(LiveSnapshotState::default())
         .manage(LiveDatasetState::default())
+        .manage(SystemTelemetryState::default())
         .manage(OverlayState::default())
         .setup(|_app| {
             let log_path = log_file_path();

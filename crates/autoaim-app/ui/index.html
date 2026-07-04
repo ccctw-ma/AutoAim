@@ -15,6 +15,7 @@
           <p data-i18n="subtitle">Select a screen and run visual monitoring.</p>
         </div>
         <div class="title-actions">
+          <button id="compactModeBtn" class="quiet-action" data-i18n="compactMode">Compact</button>
           <button id="updateStatusBtn" class="quiet-action" data-i18n="updateStatusIdle">Update</button>
           <span class="status-pill" id="statusPill" data-i18n="statusReady">Ready</span>
           <label class="select-label" for="languageSelect" data-i18n="languageLabel">Language</label>
@@ -73,6 +74,25 @@
               <strong id="captureStatusReadout">-</strong>
             </article>
           </div>
+
+          <section class="compact-dashboard" id="compactDashboard" aria-live="polite">
+            <article>
+              <span data-i18n="compactCursor">Mouse</span>
+              <strong id="compactCursorReadout">-</strong>
+            </article>
+            <article>
+              <span data-i18n="compactLatency">Latency</span>
+              <strong id="compactLatencyReadout">-</strong>
+            </article>
+            <article>
+              <span data-i18n="compactResources">CPU / GPU</span>
+              <strong id="compactResourceReadout">-</strong>
+            </article>
+            <article class="compact-people-card">
+              <span data-i18n="compactPeople">People</span>
+              <div id="compactPeopleList" class="compact-people-list">-</div>
+            </article>
+          </section>
         </section>
 
         <aside class="side-column">

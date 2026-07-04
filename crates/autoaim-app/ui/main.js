@@ -16,6 +16,8 @@ const i18n = {
     stopLive: "Stop",
     showOverlay: "Overlay",
     hideOverlay: "Close overlay",
+    compactMode: "Compact",
+    fullMode: "Full",
     showPreview: "Frame preview",
     liveStopped: "Stopped",
     liveRunning: "Running",
@@ -31,6 +33,10 @@ const i18n = {
     peopleCount: "People",
     modelStatus: "Model",
     captureStatus: "Capture",
+    compactCursor: "Mouse",
+    compactLatency: "Latency",
+    compactResources: "CPU / GPU",
+    compactPeople: "People",
     peopleKicker: "Detection",
     peopleTitle: "People",
     noPeople: "No people detected.",
@@ -122,6 +128,8 @@ const i18n = {
     stopLive: "停止",
     showOverlay: "悬浮层",
     hideOverlay: "关闭悬浮层",
+    compactMode: "缩略",
+    fullMode: "完整",
     liveStopped: "已停止",
     liveRunning: "运行中",
     liveStarting: "正在启动实时监控...",
@@ -136,6 +144,10 @@ const i18n = {
     peopleCount: "人物数",
     modelStatus: "模型",
     captureStatus: "采集",
+    compactCursor: "鼠标",
+    compactLatency: "时延",
+    compactResources: "CPU / GPU",
+    compactPeople: "人物",
     peopleKicker: "检测",
     peopleTitle: "人物",
     noPeople: "暂未识别到人物。",
@@ -259,6 +271,7 @@ const state = {
   lastFrame: null,
   lastSnapshotSummary: null,
   liveDatasetPath: null,
+  compactMode: localStorage.getItem("autoaim.compactMode") === "true",
   previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") !== "false",
   screens: [],
   selectedScreenId: null,
@@ -281,6 +294,7 @@ const els = {
   stopLiveBtn: $("stopLiveBtn"),
   showOverlayBtn: $("showOverlayBtn"),
   hideOverlayBtn: $("hideOverlayBtn"),
+  compactModeBtn: $("compactModeBtn"),
   previewFrameToggle: $("previewFrameToggle"),
   monitorCanvas: $("monitorCanvas"),
   liveState: $("liveState"),
@@ -288,6 +302,11 @@ const els = {
   peopleReadout: $("peopleReadout"),
   modelStatusReadout: $("modelStatusReadout"),
   captureStatusReadout: $("captureStatusReadout"),
+  compactDashboard: $("compactDashboard"),
+  compactCursorReadout: $("compactCursorReadout"),
+  compactLatencyReadout: $("compactLatencyReadout"),
+  compactResourceReadout: $("compactResourceReadout"),
+  compactPeopleList: $("compactPeopleList"),
   peopleList: $("peopleList"),
   inputPath: $("inputPath"),
   outputPath: $("outputPath"),
@@ -336,6 +355,7 @@ function applyLanguage(language) {
     node.placeholder = t(node.dataset.i18nPlaceholder);
   });
   updatePreviewFrameVisibility();
+  renderCompactMode();
   renderUpdateStatus();
 }
 
@@ -376,6 +396,46 @@ function withTimeout(promise, timeoutMs, label) {
       clearTimeout(timer);
     }
   });
+}
+
+function formatOptionalPercent(value) {
+  return typeof value === "number" ? `${value.toFixed(0)}%` : "-";
+}
+
+function formatLatency(latency) {
+  if (!latency) {
+    return "-";
+  }
+  const detect = typeof latency.detect_ms === "number" ? latency.detect_ms.toFixed(0) : "-";
+  const total = typeof latency.total_ms === "number" ? latency.total_ms.toFixed(0) : "-";
+  return `${detect}ms / ${total}ms`;
+}
+
+function formatResources(telemetry) {
+  if (!telemetry) {
+    return "-";
+  }
+  const cpu = formatOptionalPercent(telemetry.cpu_usage_percent);
+  const gpu = formatOptionalPercent(telemetry.gpu_usage_percent);
+  const gpuMemory =
+    typeof telemetry.gpu_memory_used_mb === "number" && typeof telemetry.gpu_memory_total_mb === "number"
+      ? ` ${telemetry.gpu_memory_used_mb}/${telemetry.gpu_memory_total_mb}MB`
+      : "";
+  return `CPU ${cpu} / GPU ${gpu}${gpuMemory}`;
+}
+
+function renderCompactMode() {
+  document.body.classList.toggle("compact-mode", state.compactMode);
+  if (els.compactModeBtn) {
+    els.compactModeBtn.textContent = state.compactMode ? t("fullMode") : t("compactMode");
+  }
+  updatePreviewFrameVisibility();
+}
+
+function setCompactMode(enabled) {
+  state.compactMode = enabled;
+  localStorage.setItem("autoaim.compactMode", String(enabled));
+  renderCompactMode();
 }
 
 async function copyDiagnostics() {
@@ -655,6 +715,30 @@ function renderPeople(people) {
   });
 }
 
+function renderCompactDashboard(snapshot, people) {
+  if (!els.compactDashboard) {
+    return;
+  }
+  const cursor = snapshot?.cursor || state.lastCursor;
+  els.compactCursorReadout.textContent = Array.isArray(cursor)
+    ? `${cursor[0].toFixed(0)}, ${cursor[1].toFixed(0)}`
+    : "-";
+  els.compactLatencyReadout.textContent = formatLatency(snapshot?.latency);
+  els.compactResourceReadout.textContent = formatResources(snapshot?.telemetry);
+
+  if (!people?.length) {
+    els.compactPeopleList.textContent = "-";
+    return;
+  }
+  els.compactPeopleList.innerHTML = "";
+  people.slice(0, 8).forEach((person) => {
+    const row = document.createElement("div");
+    const [x, y, w, h] = person.bbox;
+    row.textContent = `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")}`;
+    els.compactPeopleList.appendChild(row);
+  });
+}
+
 async function refreshScreens() {
   requireTauri();
   const screens = await invoke("list_screens");
@@ -676,7 +760,7 @@ async function refreshScreens() {
 
 function updatePreviewFrameVisibility() {
   const wrap = els.monitorCanvas?.parentElement;
-  wrap?.classList.toggle("is-hidden", !state.previewFrameEnabled);
+  wrap?.classList.toggle("is-hidden", state.compactMode || !state.previewFrameEnabled);
   if (els.previewFrameToggle) {
     els.previewFrameToggle.checked = state.previewFrameEnabled;
   }
@@ -736,7 +820,9 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
   state.livePollSequence += 1;
   const pollSequence = state.livePollSequence;
   const includeFrame =
-    state.previewFrameEnabled && (!state.lastFrame || pollSequence % LIVE_PREVIEW_FRAME_INTERVAL === 0);
+    !state.compactMode &&
+    state.previewFrameEnabled &&
+    (!state.lastFrame || pollSequence % LIVE_PREVIEW_FRAME_INTERVAL === 0);
   const pollStartedAt = performance.now();
   els.modelStatusReadout.textContent = t("modelLoading");
   if (pollSequence <= 5 || pollSequence % 60 === 0) {
@@ -774,6 +860,8 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
       provider: snapshot.provider,
       model_status: snapshot.model_status,
       capture_status: snapshot.capture_status,
+      latency: snapshot.latency,
+      telemetry: snapshot.telemetry,
       frame_size: renderFrame?.frame_size,
       screen_size: renderFrame?.screen_size,
       capture_backend: renderFrame?.capture_backend,
@@ -785,6 +873,7 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
     els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
     els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
     renderPeople(people);
+    renderCompactDashboard(snapshot, people);
     if (state.previewFrameEnabled && renderFrame) {
       drawMonitor({ ...snapshot, frame: renderFrame }, people);
     }
@@ -848,6 +937,7 @@ function isTransientLiveError(error) {
     message.includes("failed to run movenet") ||
     message.includes("dmlcommandrecorder") ||
     message.includes("live_monitor_snapshot timed out") ||
+    message.includes("live snapshot busy") ||
     message.includes("capture thread")
   );
 }
@@ -1164,6 +1254,11 @@ on(els.hideOverlayBtn, "click", async () => {
     await invoke("close_overlay_window");
     setStatus(t("hideOverlay"), "ready");
   });
+});
+
+on(els.compactModeBtn, "click", () => {
+  setCompactMode(!state.compactMode);
+  log("Compact mode toggled", { enabled: state.compactMode });
 });
 
 on(els.previewFrameToggle, "change", (event) => {
