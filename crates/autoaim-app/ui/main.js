@@ -741,6 +741,8 @@ function renderPeople(people) {
       <strong>#${person.object_index} ${person.class_name || "person"}</strong>
       <span>bbox [${person.bbox.map((value) => value.toFixed(0)).join(", ")}]</span>
       <span>head [${person.head_point.map((value) => value.toFixed(0)).join(", ")}]</span>
+      <span>predicted [${(person.predicted_head_point || person.head_point).map((value) => value.toFixed(0)).join(", ")}] / ${person.prediction_ms || 0}ms</span>
+      <span>velocity [${(person.velocity || [0, 0]).map((value) => value.toFixed(1)).join(", ")}] px/s</span>
       <span>dx ${person.dx.toFixed(1)} / dy ${person.dy.toFixed(1)}</span>
       <span>confidence ${(person.confidence * 100).toFixed(1)}%</span>
       <span>${keypoints || "keypoints -"}</span>
@@ -767,7 +769,9 @@ function renderCompactDashboard(snapshot, people) {
   }
   const rows = people.slice(0, 8).map((person) => {
     const [x, y, w, h] = person.bbox;
-    return `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")}`;
+    const predicted = person.predicted_head_point || person.head_point;
+    const velocity = person.velocity || [0, 0];
+    return `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")} pred ${predicted.map((value) => value.toFixed(0)).join(",")} v ${velocity.map((value) => value.toFixed(0)).join(",")}`;
   });
   setTextContent(els.compactPeopleList, rows.join("\n"));
 }

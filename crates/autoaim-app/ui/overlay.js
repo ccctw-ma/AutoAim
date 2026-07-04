@@ -114,6 +114,57 @@ function drawSkeleton(ctx, keypoints, projectPoint) {
   ctx.restore();
 }
 
+function drawPrediction(ctx, person, projectPoint) {
+  if (!Array.isArray(person.predicted_head_point) || !Array.isArray(person.velocity)) {
+    return;
+  }
+  const [headX, headY] = projectPoint(person.head_point);
+  const [predictedX, predictedY] = projectPoint(person.predicted_head_point);
+  const velocity = person.velocity;
+  const speed = Math.hypot(velocity[0], velocity[1]);
+  const curveDx = predictedX - headX;
+  const curveDy = predictedY - headY;
+  const curveLength = Math.hypot(curveDx, curveDy);
+  const bend = Math.min(28, Math.max(8, curveLength * 0.18));
+  const normalX = curveLength > 0 ? -curveDy / curveLength : 0;
+  const normalY = curveLength > 0 ? curveDx / curveLength : 0;
+  const controlX = headX + curveDx * 0.55 + normalX * bend;
+  const controlY = headY + curveDy * 0.55 + normalY * bend;
+
+  ctx.save();
+  ctx.setLineDash([10, 8]);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "#facc15";
+  ctx.beginPath();
+  ctx.moveTo(headX, headY);
+  ctx.quadraticCurveTo(controlX, controlY, predictedX, predictedY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#fde68a";
+  ctx.fillStyle = "#facc15";
+  ctx.beginPath();
+  ctx.arc(predictedX, predictedY, 7, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(predictedX - 10, predictedY);
+  ctx.lineTo(predictedX + 10, predictedY);
+  ctx.moveTo(predictedX, predictedY - 10);
+  ctx.lineTo(predictedX, predictedY + 10);
+  ctx.stroke();
+
+  if (speed > 1) {
+    const velocityScale = Math.min(0.08, 80 / speed);
+    ctx.strokeStyle = "#38bdf8";
+    ctx.beginPath();
+    ctx.moveTo(headX, headY);
+    ctx.lineTo(headX + velocity[0] * velocityScale, headY + velocity[1] * velocityScale);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawPoseLayer(snapshot) {
   resizeLayers(snapshot.screen_size[0], snapshot.screen_size[1]);
   poseCtx.clearRect(0, 0, poseCanvas.width, poseCanvas.height);
@@ -138,6 +189,7 @@ function drawPoseLayer(snapshot) {
     poseCtx.beginPath();
     poseCtx.arc(headX, headY, 5, 0, Math.PI * 2);
     poseCtx.fill();
+    drawPrediction(poseCtx, person, projectPoint);
 
     poseCtx.fillStyle = "#a7f3d0";
     (person.keypoints || [])

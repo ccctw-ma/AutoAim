@@ -51,6 +51,10 @@ const BUNDLED_YOLOV8_ONNX_MODEL: &str = "models/yolov8n.onnx";
 const LIVE_CAPTURE_MAX_FRAME_SIZE: [u32; 2] = [1920, 1080];
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const DEFAULT_LIVE_CONFIDENCE_THRESHOLD: f32 = 0.35;
+const LIVE_HEAD_PREDICTION_MS: u32 = 120;
+const LIVE_HEAD_VELOCITY_EMA_ALPHA: f32 = 0.35;
+const LIVE_HEAD_MAX_TRACK_DT_MS: f32 = 250.0;
+const LIVE_HEAD_MAX_SPEED_PX_PER_SEC: f32 = 5000.0;
 const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
 const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
 const LIVE_CAPTURE_TIMEOUT_MS: u64 = 1000;
@@ -160,6 +164,9 @@ struct LivePersonPosition {
     class_name: String,
     bbox: [f32; 4],
     head_point: Point,
+    predicted_head_point: Point,
+    velocity: Point,
+    prediction_ms: u32,
     keypoints: Vec<PoseKeypoint>,
     confidence: f32,
     track_id: Option<u64>,
@@ -265,6 +272,14 @@ struct DiagnosticContext {
 #[derive(Default)]
 struct LiveTrackingState {
     trackers: Mutex<HashMap<String, ObjectTracker>>,
+    head_predictions: Mutex<HashMap<String, HashMap<u64, HeadPredictionTrack>>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeadPredictionTrack {
+    head_point: Point,
+    velocity: Point,
+    timestamp_millis: u128,
 }
 
 #[derive(Debug)]
@@ -553,7 +568,16 @@ fn build_live_monitor_snapshot(
     let mut tracked_objects = inference.objects.clone();
     apply_live_tracking(&tracking_state, &screen.id, &mut tracked_objects)
         .map_err(|error| error.to_string())?;
-    let people = live_positions_from_objects(&tracked_objects, &inference.poses, frame.cursor);
+    let people = live_positions_from_objects(
+        &tracking_state,
+        &screen.id,
+        &tracked_objects,
+        &inference.poses,
+        frame.cursor,
+        frame.timestamp_millis,
+        screen.origin,
+        screen.size,
+    );
     let tracking_ms = tracking_started.elapsed().as_millis();
     let capture_status = format!(
         "native Windows capture [{}]: {}x{} preview from {}x{} screen",
@@ -977,15 +1001,39 @@ fn path_to_string(path: PathBuf) -> String {
 }
 
 fn live_positions_from_objects(
+    tracking_state: &LiveTrackingState,
+    screen_id: &str,
     objects: &[DetectionObject],
     poses: &[PoseEstimate],
     cursor: Point,
+    timestamp_millis: u128,
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
 ) -> Vec<LivePersonPosition> {
-    objects
+    let mut prediction_tracks = tracking_state.head_predictions.lock().ok();
+    let mut seen_track_ids = Vec::new();
+    let people = objects
         .iter()
         .enumerate()
         .map(|(object_index, object)| {
             let head_point = object.aim_point();
+            let (velocity, predicted_head_point) = object
+                .track_id
+                .and_then(|track_id| {
+                    seen_track_ids.push(track_id);
+                    prediction_tracks.as_mut().map(|tracks_by_screen| {
+                        predict_tracked_head_point(
+                            tracks_by_screen,
+                            screen_id,
+                            track_id,
+                            head_point,
+                            timestamp_millis,
+                            screen_origin,
+                            screen_size,
+                        )
+                    })
+                })
+                .unwrap_or(([0.0, 0.0], head_point));
             let keypoints = poses
                 .get(object_index)
                 .map(|pose| pose.keypoints.clone())
@@ -996,6 +1044,9 @@ fn live_positions_from_objects(
                 class_name: object.class_name.clone(),
                 bbox: object.bbox,
                 head_point,
+                predicted_head_point,
+                velocity,
+                prediction_ms: LIVE_HEAD_PREDICTION_MS,
                 keypoints,
                 confidence: object.confidence,
                 track_id: object.track_id,
@@ -1003,7 +1054,86 @@ fn live_positions_from_objects(
                 dy: head_point[1] - cursor[1],
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if let Some(tracks_by_screen) = prediction_tracks.as_mut() {
+        if let Some(screen_tracks) = tracks_by_screen.get_mut(screen_id) {
+            screen_tracks.retain(|track_id, track| {
+                seen_track_ids.contains(track_id)
+                    || timestamp_millis.saturating_sub(track.timestamp_millis) <= 1000
+            });
+        }
+    }
+
+    people
+}
+
+fn predict_tracked_head_point(
+    tracks_by_screen: &mut HashMap<String, HashMap<u64, HeadPredictionTrack>>,
+    screen_id: &str,
+    track_id: u64,
+    head_point: Point,
+    timestamp_millis: u128,
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+) -> (Point, Point) {
+    let screen_tracks = tracks_by_screen.entry(screen_id.to_string()).or_default();
+    let previous = screen_tracks.get(&track_id).copied();
+    let velocity = previous
+        .and_then(|track| {
+            let dt_ms = timestamp_millis.saturating_sub(track.timestamp_millis) as f32;
+            if !(1.0..=LIVE_HEAD_MAX_TRACK_DT_MS).contains(&dt_ms) {
+                return None;
+            }
+            let dt_seconds = dt_ms / 1000.0;
+            let instantaneous = [
+                (head_point[0] - track.head_point[0]) / dt_seconds,
+                (head_point[1] - track.head_point[1]) / dt_seconds,
+            ];
+            Some([
+                track.velocity[0] * (1.0 - LIVE_HEAD_VELOCITY_EMA_ALPHA)
+                    + instantaneous[0] * LIVE_HEAD_VELOCITY_EMA_ALPHA,
+                track.velocity[1] * (1.0 - LIVE_HEAD_VELOCITY_EMA_ALPHA)
+                    + instantaneous[1] * LIVE_HEAD_VELOCITY_EMA_ALPHA,
+            ])
+        })
+        .map(clamp_head_velocity)
+        .unwrap_or([0.0, 0.0]);
+    let prediction_seconds = LIVE_HEAD_PREDICTION_MS as f32 / 1000.0;
+    let predicted = clamp_point_to_screen(
+        [
+            head_point[0] + velocity[0] * prediction_seconds,
+            head_point[1] + velocity[1] * prediction_seconds,
+        ],
+        screen_origin,
+        screen_size,
+    );
+    screen_tracks.insert(
+        track_id,
+        HeadPredictionTrack {
+            head_point,
+            velocity,
+            timestamp_millis,
+        },
+    );
+    (velocity, predicted)
+}
+
+fn clamp_head_velocity(velocity: Point) -> Point {
+    let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
+    if speed <= LIVE_HEAD_MAX_SPEED_PX_PER_SEC || speed <= f32::EPSILON {
+        return velocity;
+    }
+    let scale = LIVE_HEAD_MAX_SPEED_PX_PER_SEC / speed;
+    [velocity[0] * scale, velocity[1] * scale]
+}
+
+fn clamp_point_to_screen(point: Point, origin: [i32; 2], size: [u32; 2]) -> Point {
+    let min_x = origin[0] as f32;
+    let min_y = origin[1] as f32;
+    let max_x = min_x + size[0].saturating_sub(1) as f32;
+    let max_y = min_y + size[1].saturating_sub(1) as f32;
+    [point[0].clamp(min_x, max_x), point[1].clamp(min_y, max_y)]
 }
 
 fn apply_live_tracking(
