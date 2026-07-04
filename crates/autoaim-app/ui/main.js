@@ -235,7 +235,7 @@ const i18n = {
 const LIVE_POLL_INTERVAL_MS = 16;
 const LIVE_SNAPSHOT_TIMEOUT_MS = 1200;
 const OPEN_OVERLAY_TIMEOUT_MS = 3500;
-const LIVE_PREVIEW_FRAME_INTERVAL = 3;
+const LIVE_PREVIEW_FRAME_INTERVAL = 15;
 const LIVE_WATCHDOG_INTERVAL_MS = 1000;
 const LIVE_STUCK_POLL_MS = 600;
 const LIVE_TRANSIENT_ERROR_DELAY_MS = 64;
@@ -278,7 +278,7 @@ const state = {
   compactMode: localStorage.getItem("autoaim.compactMode") === "true",
   activationKey: localStorage.getItem("autoaim.activationKey") || "alt",
   recordDataset: localStorage.getItem("autoaim.recordDataset") === "true",
-  previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") !== "false",
+  previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") === "true",
   screens: [],
   selectedScreenId: null,
   updateCheckRunning: false,
@@ -290,6 +290,12 @@ const $ = (id) => document.getElementById(id);
 const on = (element, eventName, handler) => {
   element?.addEventListener(eventName, handler);
 };
+
+function setTextContent(element, value) {
+  if (element && element.textContent !== value) {
+    element.textContent = value;
+  }
+}
 
 const els = {
   languageSelect: $("languageSelect"),
@@ -747,23 +753,22 @@ function renderCompactDashboard(snapshot, people) {
     return;
   }
   const cursor = snapshot?.cursor || state.lastCursor;
-  els.compactCursorReadout.textContent = Array.isArray(cursor)
-    ? `${cursor[0].toFixed(0)}, ${cursor[1].toFixed(0)}`
-    : "-";
-  els.compactLatencyReadout.textContent = formatLatency(snapshot?.latency);
-  els.compactResourceReadout.textContent = formatResources(snapshot?.telemetry);
+  setTextContent(
+    els.compactCursorReadout,
+    Array.isArray(cursor) ? `${cursor[0].toFixed(0)}, ${cursor[1].toFixed(0)}` : "-",
+  );
+  setTextContent(els.compactLatencyReadout, formatLatency(snapshot?.latency));
+  setTextContent(els.compactResourceReadout, formatResources(snapshot?.telemetry));
 
   if (!people?.length) {
-    els.compactPeopleList.textContent = "-";
+    setTextContent(els.compactPeopleList, "-");
     return;
   }
-  els.compactPeopleList.innerHTML = "";
-  people.slice(0, 8).forEach((person) => {
-    const row = document.createElement("div");
+  const rows = people.slice(0, 8).map((person) => {
     const [x, y, w, h] = person.bbox;
-    row.textContent = `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")}`;
-    els.compactPeopleList.appendChild(row);
+    return `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")}`;
   });
+  setTextContent(els.compactPeopleList, rows.join("\n"));
 }
 
 async function refreshScreens() {
@@ -852,7 +857,6 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
     state.previewFrameEnabled &&
     (!state.lastFrame || pollSequence % LIVE_PREVIEW_FRAME_INTERVAL === 0);
   const pollStartedAt = performance.now();
-  els.modelStatusReadout.textContent = t("modelLoading");
   if (pollSequence <= 5 || pollSequence % 60 === 0) {
     writeFileLog("ui", "live poll start", {
       sequence: pollSequence,
@@ -897,11 +901,13 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
     };
     const people = snapshot.people || [];
     state.detectedPeople = people;
-    els.cursorReadout.textContent = `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`;
-    els.peopleReadout.textContent = people.length;
-    els.modelStatusReadout.textContent = snapshot.model_status || t("modelLoaded");
-    els.captureStatusReadout.textContent = snapshot.capture_status || t("nativeCapture");
-    renderPeople(people);
+    setTextContent(els.cursorReadout, `${snapshot.cursor[0].toFixed(0)}, ${snapshot.cursor[1].toFixed(0)}`);
+    setTextContent(els.peopleReadout, String(people.length));
+    setTextContent(els.modelStatusReadout, snapshot.model_status || t("modelLoaded"));
+    setTextContent(els.captureStatusReadout, snapshot.capture_status || t("nativeCapture"));
+    if (!state.compactMode) {
+      renderPeople(people);
+    }
     renderCompactDashboard(snapshot, people);
     if (state.previewFrameEnabled && renderFrame) {
       drawMonitor({ ...snapshot, frame: renderFrame }, people);

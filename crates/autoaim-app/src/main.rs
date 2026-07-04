@@ -28,6 +28,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Sender},
         Arc, Mutex,
     },
     thread,
@@ -318,9 +319,15 @@ struct GpuTelemetrySample {
 struct LiveDatasetRecorder {
     root: PathBuf,
     frames_dir: PathBuf,
-    records_path: PathBuf,
-    frames_written: u64,
+    tx: Sender<LiveDatasetWrite>,
+    frames_queued: u64,
     max_frames: u64,
+}
+
+struct LiveDatasetWrite {
+    frame_path: PathBuf,
+    rgba: Vec<u8>,
+    record_line: String,
 }
 
 struct OverlayState {
@@ -796,20 +803,26 @@ fn resize_rgba_nearest(rgba: &[u8], source_size: [u32; 2], target_size: [u32; 2]
     let source_height = source_height as usize;
     let target_width = target_width as usize;
     let target_height = target_height as usize;
-    let scale_x = source_width as f32 / target_width as f32;
-    let scale_y = source_height as f32 / target_height as f32;
+    let source_x_offsets = (0..target_width)
+        .map(|target_x| {
+            (((target_x * 2 + 1) * source_width) / (target_width.max(1) * 2))
+                .min(source_width.saturating_sub(1))
+                * 4
+        })
+        .collect::<Vec<_>>();
+    let source_y_rows = (0..target_height)
+        .map(|target_y| {
+            (((target_y * 2 + 1) * source_height) / (target_height.max(1) * 2))
+                .min(source_height.saturating_sub(1))
+                * source_width
+                * 4
+        })
+        .collect::<Vec<_>>();
     let mut resized = vec![0_u8; target_width * target_height * 4];
 
-    for target_y in 0..target_height {
-        let source_y = ((target_y as f32 + 0.5) * scale_y)
-            .floor()
-            .clamp(0.0, source_height.saturating_sub(1) as f32) as usize;
-        for target_x in 0..target_width {
-            let source_x = ((target_x as f32 + 0.5) * scale_x)
-                .floor()
-                .clamp(0.0, source_width.saturating_sub(1) as f32)
-                as usize;
-            let source_index = (source_y * source_width + source_x) * 4;
+    for (target_y, source_row) in source_y_rows.iter().copied().enumerate() {
+        for (target_x, source_x) in source_x_offsets.iter().copied().enumerate() {
+            let source_index = source_row + source_x;
             let target_index = (target_y * target_width + target_x) * 4;
             resized[target_index..target_index + 4]
                 .copy_from_slice(&rgba[source_index..source_index + 4]);
@@ -1238,6 +1251,7 @@ fn start_live_dataset_recording(
     )
     .map_err(|error| error.to_string())?;
     std::fs::File::create(&records_path).map_err(|error| error.to_string())?;
+    let tx = start_live_dataset_writer(records_path.clone())?;
 
     let mut recorder = dataset_state
         .recorder
@@ -1246,8 +1260,8 @@ fn start_live_dataset_recording(
     *recorder = Some(LiveDatasetRecorder {
         root: root.clone(),
         frames_dir,
-        records_path,
-        frames_written: 0,
+        tx,
+        frames_queued: 0,
         max_frames: LIVE_DATASET_MAX_FRAMES,
     });
     append_app_log(
@@ -1276,11 +1290,47 @@ fn stop_live_dataset_recording(
             Some(&format!(
                 r#"{{"path":"{}","frames":{}}}"#,
                 recorder.root.display(),
-                recorder.frames_written
+                recorder.frames_queued
             )),
         );
     }
     Ok(())
+}
+
+fn start_live_dataset_writer(records_path: PathBuf) -> Result<Sender<LiveDatasetWrite>, String> {
+    let (tx, rx) = mpsc::channel::<LiveDatasetWrite>();
+    thread::Builder::new()
+        .name("autoaim-dataset-writer".to_string())
+        .spawn(move || {
+            let mut records_file = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&records_path)
+            {
+                Ok(file) => file,
+                Err(_) => {
+                    append_app_log(
+                        "backend",
+                        "live dataset writer failed to open records",
+                        None,
+                    );
+                    return;
+                }
+            };
+            for item in rx {
+                if std::fs::write(&item.frame_path, &item.rgba).is_err() {
+                    append_app_log("backend", "live dataset frame write failed", None);
+                    continue;
+                }
+                use std::io::Write;
+                if writeln!(records_file, "{}", item.record_line).is_err() {
+                    append_app_log("backend", "live dataset record write failed", None);
+                    break;
+                }
+            }
+        })
+        .map_err(|error| format!("failed to start dataset writer: {error}"))?;
+    Ok(tx)
 }
 
 fn record_live_dataset_frame(
@@ -1296,23 +1346,7 @@ fn record_live_dataset_frame(
     total_ms: u128,
     people: &[LivePersonPosition],
 ) {
-    let mut recorder = match dataset_state.recorder.lock() {
-        Ok(recorder) => recorder,
-        Err(_) => return,
-    };
-    let Some(recorder) = recorder.as_mut() else {
-        return;
-    };
-    if recorder.frames_written >= recorder.max_frames {
-        return;
-    }
-
     let frame_name = format!("frame-{sequence:06}.rgba");
-    let frame_path = recorder.frames_dir.join(&frame_name);
-    if std::fs::write(&frame_path, &frame.rgba).is_err() {
-        append_app_log("backend", "live dataset frame write failed", None);
-        return;
-    }
     let frame_file = format!("frames/{frame_name}");
     let record = LiveDatasetRecord {
         schema_version: 1,
@@ -1339,25 +1373,50 @@ fn record_live_dataset_frame(
     let Ok(line) = serde_json::to_string(&record) else {
         return;
     };
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&recorder.records_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "{line}");
-        recorder.frames_written += 1;
-        if recorder.frames_written == recorder.max_frames {
-            append_app_log(
-                "backend",
-                "live dataset recording reached frame limit",
-                Some(&format!(
-                    r#"{{"path":"{}","frames":{}}}"#,
-                    recorder.root.display(),
-                    recorder.frames_written
-                )),
-            );
+
+    let (frame_path, tx, frames_queued, root) = {
+        let mut recorder = match dataset_state.recorder.lock() {
+            Ok(recorder) => recorder,
+            Err(_) => return,
+        };
+        let Some(recorder) = recorder.as_mut() else {
+            return;
+        };
+        if recorder.frames_queued >= recorder.max_frames {
+            return;
         }
+
+        recorder.frames_queued += 1;
+        (
+            recorder.frames_dir.join(&frame_name),
+            recorder.tx.clone(),
+            recorder.frames_queued,
+            recorder.root.clone(),
+        )
+    };
+
+    if tx
+        .send(LiveDatasetWrite {
+            frame_path,
+            rgba: frame.rgba.clone(),
+            record_line: line,
+        })
+        .is_err()
+    {
+        append_app_log("backend", "live dataset frame queue failed", None);
+        return;
+    }
+
+    if frames_queued == LIVE_DATASET_MAX_FRAMES {
+        append_app_log(
+            "backend",
+            "live dataset recording reached frame limit",
+            Some(&format!(
+                r#"{{"path":"{}","frames":{}}}"#,
+                root.display(),
+                frames_queued
+            )),
+        );
     }
 }
 

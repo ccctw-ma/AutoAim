@@ -1,7 +1,9 @@
 const tauriApi = window.__TAURI__ || {};
 const eventApi = tauriApi.event;
-const canvas = document.getElementById("overlayCanvas");
-const ctx = canvas.getContext("2d");
+const poseCanvas = document.getElementById("overlayCanvas");
+const cursorCanvas = document.getElementById("cursorCanvas");
+const poseCtx = poseCanvas.getContext("2d");
+const cursorCtx = cursorCanvas.getContext("2d");
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
 const SKELETON_CONNECTIONS = [
   ["nose", "left_eye"],
@@ -21,7 +23,13 @@ const SKELETON_CONNECTIONS = [
   ["right_hip", "right_knee"],
   ["right_knee", "right_ankle"],
 ];
+const CURSOR_EVENT_SUPPRESS_AFTER_SNAPSHOT_MS = 80;
 let latestSnapshot = null;
+let latestCursorSnapshot = null;
+let pendingPoseFrame = 0;
+let pendingCursorFrame = 0;
+let lastCursorRect = null;
+let lastSnapshotReceivedAt = 0;
 let overlaySnapshotLogCount = 0;
 let overlayCursorLogCount = 0;
 
@@ -33,15 +41,23 @@ function overlayLog(message, data) {
   tauriApi.tauri.invoke("frontend_log", { scope: "overlay", message, payload }).catch(() => {});
 }
 
-function resizeCanvas(width, height) {
+function resizeCanvas(canvas, width, height) {
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
 }
 
-function clearOverlay() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+function resizeLayers(width, height) {
+  resizeCanvas(poseCanvas, width, height);
+  resizeCanvas(cursorCanvas, width, height);
+}
+
+function requestOverlayFrame(callback) {
+  if (typeof window.requestAnimationFrame === "function") {
+    return window.requestAnimationFrame(callback);
+  }
+  return window.setTimeout(callback, 16);
 }
 
 function visibleKeypointMap(keypoints) {
@@ -55,7 +71,7 @@ function visibleKeypointMap(keypoints) {
   return points;
 }
 
-function drawSkeleton(keypoints, projectPoint) {
+function drawSkeleton(ctx, keypoints, projectPoint) {
   const points = visibleKeypointMap(keypoints);
   if (points.size < 2) {
     return;
@@ -98,14 +114,13 @@ function drawSkeleton(keypoints, projectPoint) {
   ctx.restore();
 }
 
-function drawSnapshot(snapshot) {
-  latestSnapshot = snapshot;
-  resizeCanvas(snapshot.screen_size[0], snapshot.screen_size[1]);
-  clearOverlay();
+function drawPoseLayer(snapshot) {
+  resizeLayers(snapshot.screen_size[0], snapshot.screen_size[1]);
+  poseCtx.clearRect(0, 0, poseCanvas.width, poseCanvas.height);
 
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "#f97316";
-  ctx.fillStyle = "#f97316";
+  poseCtx.lineWidth = 2;
+  poseCtx.strokeStyle = "#f97316";
+  poseCtx.fillStyle = "#f97316";
 
   (snapshot.people || []).forEach((person) => {
     const [x, y, w, h] = person.bbox;
@@ -115,54 +130,124 @@ function drawSnapshot(snapshot) {
     ];
     const rectX = x - snapshot.screen_origin[0];
     const rectY = y - snapshot.screen_origin[1];
-    ctx.strokeRect(rectX, rectY, w, h);
+    poseCtx.strokeRect(rectX, rectY, w, h);
 
-    drawSkeleton(person.keypoints, projectPoint);
+    drawSkeleton(poseCtx, person.keypoints, projectPoint);
 
     const [headX, headY] = projectPoint(person.head_point);
-    ctx.beginPath();
-    ctx.arc(headX, headY, 5, 0, Math.PI * 2);
-    ctx.fill();
+    poseCtx.beginPath();
+    poseCtx.arc(headX, headY, 5, 0, Math.PI * 2);
+    poseCtx.fill();
 
-    ctx.fillStyle = "#a7f3d0";
+    poseCtx.fillStyle = "#a7f3d0";
     (person.keypoints || [])
       .filter((keypoint) => keypoint.score >= KEYPOINT_SCORE_THRESHOLD)
       .forEach((keypoint) => {
         const [keypointX, keypointY] = projectPoint(keypoint.point);
-        ctx.beginPath();
-        ctx.arc(keypointX, keypointY, 3, 0, Math.PI * 2);
-        ctx.fill();
+        poseCtx.beginPath();
+        poseCtx.arc(keypointX, keypointY, 3, 0, Math.PI * 2);
+        poseCtx.fill();
       });
-    ctx.fillStyle = "#f97316";
+    poseCtx.fillStyle = "#f97316";
   });
+}
+
+function cursorClearRect(cursorX, cursorY) {
+  const margin = 18;
+  return [cursorX - margin, cursorY - margin, margin * 2, margin * 2];
+}
+
+function clearCursorRect(rect) {
+  if (!rect) {
+    return;
+  }
+  cursorCtx.clearRect(rect[0], rect[1], rect[2], rect[3]);
+}
+
+function drawCursorLayer(snapshot) {
+  resizeLayers(snapshot.screen_size[0], snapshot.screen_size[1]);
+  clearCursorRect(lastCursorRect);
+  lastCursorRect = null;
 
   if (snapshot.cursor_on_screen) {
     const cursorX = snapshot.cursor[0] - snapshot.screen_origin[0];
     const cursorY = snapshot.cursor[1] - snapshot.screen_origin[1];
-    ctx.strokeStyle = "#22d3ee";
-    ctx.fillStyle = "#22d3ee";
-    ctx.beginPath();
-    ctx.moveTo(cursorX - 12, cursorY);
-    ctx.lineTo(cursorX + 12, cursorY);
-    ctx.moveTo(cursorX, cursorY - 12);
-    ctx.lineTo(cursorX, cursorY + 12);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(cursorX, cursorY, 4, 0, Math.PI * 2);
-    ctx.fill();
+    lastCursorRect = cursorClearRect(cursorX, cursorY);
+    cursorCtx.clearRect(lastCursorRect[0], lastCursorRect[1], lastCursorRect[2], lastCursorRect[3]);
+    cursorCtx.strokeStyle = "#22d3ee";
+    cursorCtx.fillStyle = "#22d3ee";
+    cursorCtx.lineWidth = 2;
+    cursorCtx.beginPath();
+    cursorCtx.moveTo(cursorX - 12, cursorY);
+    cursorCtx.lineTo(cursorX + 12, cursorY);
+    cursorCtx.moveTo(cursorX, cursorY - 12);
+    cursorCtx.lineTo(cursorX, cursorY + 12);
+    cursorCtx.stroke();
+    cursorCtx.beginPath();
+    cursorCtx.arc(cursorX, cursorY, 4, 0, Math.PI * 2);
+    cursorCtx.fill();
   }
 }
 
-function drawCursorSnapshot(snapshot) {
-  const merged =
-    latestSnapshot && latestSnapshot.screen_id === snapshot.screen_id
-      ? { ...latestSnapshot, cursor: snapshot.cursor, cursor_on_screen: snapshot.cursor_on_screen }
-      : { ...snapshot, people: [] };
-  drawSnapshot(merged);
+function currentPoseSnapshot() {
+  return latestSnapshot || latestCursorSnapshot;
+}
+
+function currentCursorSnapshot() {
+  if (latestSnapshot) {
+    if (latestCursorSnapshot && latestCursorSnapshot.screen_id === latestSnapshot.screen_id) {
+      return {
+        ...latestSnapshot,
+        cursor: latestCursorSnapshot.cursor,
+        cursor_on_screen: latestCursorSnapshot.cursor_on_screen,
+      };
+    }
+    return latestSnapshot;
+  }
+
+  if (latestCursorSnapshot) {
+    return { ...latestCursorSnapshot, people: [] };
+  }
+  return null;
+}
+
+function schedulePoseDraw() {
+  if (pendingPoseFrame) {
+    return;
+  }
+  pendingPoseFrame = requestOverlayFrame(() => {
+    pendingPoseFrame = 0;
+    const snapshot = currentPoseSnapshot();
+    if (snapshot) {
+      drawPoseLayer(snapshot);
+    }
+  });
+}
+
+function scheduleCursorDraw() {
+  if (pendingCursorFrame) {
+    return;
+  }
+  pendingCursorFrame = requestOverlayFrame(() => {
+    pendingCursorFrame = 0;
+    const snapshot = currentCursorSnapshot();
+    if (snapshot) {
+      drawCursorLayer(snapshot);
+    }
+  });
 }
 
 if (eventApi?.listen) {
   eventApi.listen("overlay_snapshot", (event) => {
+    latestSnapshot = event.payload;
+    latestCursorSnapshot = {
+      screen_id: event.payload.screen_id,
+      screen_origin: event.payload.screen_origin,
+      screen_size: event.payload.screen_size,
+      cursor: event.payload.cursor,
+      cursor_on_screen: event.payload.cursor_on_screen,
+    };
+    lastSnapshotReceivedAt = performance.now();
     overlaySnapshotLogCount += 1;
     if (overlaySnapshotLogCount <= 3 || overlaySnapshotLogCount % 60 === 0) {
       overlayLog("overlay_snapshot", {
@@ -172,9 +257,16 @@ if (eventApi?.listen) {
         screen_id: event.payload.screen_id,
       });
     }
-    drawSnapshot(event.payload);
+    schedulePoseDraw();
+    scheduleCursorDraw();
   });
   eventApi.listen("overlay_cursor", (event) => {
+    const recentlyReceivedSnapshot =
+      performance.now() - lastSnapshotReceivedAt < CURSOR_EVENT_SUPPRESS_AFTER_SNAPSHOT_MS;
+    if (recentlyReceivedSnapshot && latestSnapshot?.screen_id === event.payload.screen_id) {
+      return;
+    }
+    latestCursorSnapshot = event.payload;
     overlayCursorLogCount += 1;
     if (overlayCursorLogCount % 60 === 1) {
       overlayLog("overlay_cursor", {
@@ -183,6 +275,6 @@ if (eventApi?.listen) {
         screen_id: event.payload.screen_id,
       });
     }
-    drawCursorSnapshot(event.payload);
+    scheduleCursorDraw();
   });
 }
