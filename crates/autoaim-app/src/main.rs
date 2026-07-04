@@ -455,6 +455,7 @@ async fn live_monitor_snapshot(
     provider: Option<String>,
     confidence_threshold: Option<f32>,
     activation_key: Option<String>,
+    prediction_enabled: Option<bool>,
     include_frame: Option<bool>,
 ) -> Result<LiveMonitorSnapshot, String> {
     let in_flight = app.state::<LiveSnapshotState>().in_flight.clone();
@@ -491,6 +492,7 @@ async fn live_monitor_snapshot(
             &screen,
             config,
             activation_key.unwrap_or_else(|| "alt".to_string()),
+            prediction_enabled.unwrap_or(false),
             include_frame.unwrap_or(true),
         )
     })
@@ -509,6 +511,7 @@ fn build_live_monitor_snapshot(
     screen: &ScreenInfo,
     config: NativeInferenceConfig,
     activation_key: String,
+    prediction_enabled: bool,
     include_frame: bool,
 ) -> Result<LiveMonitorSnapshot, String> {
     let sequence = LIVE_SNAPSHOT_SEQUENCE
@@ -577,6 +580,7 @@ fn build_live_monitor_snapshot(
         frame.timestamp_millis,
         screen.origin,
         screen.size,
+        prediction_enabled,
     );
     let tracking_ms = tracking_started.elapsed().as_millis();
     let capture_status = format!(
@@ -1009,8 +1013,11 @@ fn live_positions_from_objects(
     timestamp_millis: u128,
     screen_origin: [i32; 2],
     screen_size: [u32; 2],
+    prediction_enabled: bool,
 ) -> Vec<LivePersonPosition> {
-    let mut prediction_tracks = tracking_state.head_predictions.lock().ok();
+    let mut prediction_tracks = prediction_enabled
+        .then(|| tracking_state.head_predictions.lock().ok())
+        .flatten();
     let mut seen_track_ids = Vec::new();
     let people = objects
         .iter()
@@ -1019,6 +1026,7 @@ fn live_positions_from_objects(
             let head_point = object.aim_point();
             let (velocity, predicted_head_point) = object
                 .track_id
+                .filter(|_| prediction_enabled)
                 .and_then(|track_id| {
                     seen_track_ids.push(track_id);
                     prediction_tracks.as_mut().map(|tracks_by_screen| {
@@ -1046,7 +1054,11 @@ fn live_positions_from_objects(
                 head_point,
                 predicted_head_point,
                 velocity,
-                prediction_ms: LIVE_HEAD_PREDICTION_MS,
+                prediction_ms: if prediction_enabled {
+                    LIVE_HEAD_PREDICTION_MS
+                } else {
+                    0
+                },
                 keypoints,
                 confidence: object.confidence,
                 track_id: object.track_id,

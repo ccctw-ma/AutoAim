@@ -115,7 +115,11 @@ function drawSkeleton(ctx, keypoints, projectPoint) {
 }
 
 function drawPrediction(ctx, person, projectPoint) {
-  if (!Array.isArray(person.predicted_head_point) || !Array.isArray(person.velocity)) {
+  if (
+    !person.prediction_ms ||
+    !Array.isArray(person.predicted_head_point) ||
+    !Array.isArray(person.velocity)
+  ) {
     return;
   }
   const [headX, headY] = projectPoint(person.head_point);

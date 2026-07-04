@@ -58,6 +58,7 @@ const i18n = {
     threshold: "Confidence",
     activationKey: "Activation key",
     recordDataset: "Record dataset",
+    predictionOverlay: "Prediction overlay",
     modelPath: "Model path",
     modelPathPlaceholder: "Bundled model",
     showRuntime: "Show config",
@@ -171,6 +172,7 @@ const i18n = {
     threshold: "置信度",
     activationKey: "激活键",
     recordDataset: "录制数据集",
+    predictionOverlay: "预测显示",
     modelPath: "模型路径",
     modelPathPlaceholder: "使用内置模型",
     showRuntime: "显示配置",
@@ -279,6 +281,7 @@ const state = {
   compactMode: localStorage.getItem("autoaim.compactMode") === "true",
   activationKey: localStorage.getItem("autoaim.activationKey") || "alt",
   recordDataset: localStorage.getItem("autoaim.recordDataset") === "true",
+  predictionEnabled: localStorage.getItem("autoaim.predictionEnabled") === "true",
   previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") === "true",
   screens: [],
   selectedScreenId: null,
@@ -334,6 +337,7 @@ const els = {
   providerSelect: $("providerSelect"),
   confidenceInput: $("confidenceInput"),
   activationKeySelect: $("activationKeySelect"),
+  predictionToggle: $("predictionToggle"),
   modelPath: $("modelPath"),
   showRuntimeBtn: $("showRuntimeBtn"),
   updateStatusBtn: $("updateStatusBtn"),
@@ -367,6 +371,9 @@ function applyLanguage(language) {
   }
   if (els.recordDatasetToggle) {
     els.recordDatasetToggle.checked = state.recordDataset;
+  }
+  if (els.predictionToggle) {
+    els.predictionToggle.checked = state.predictionEnabled;
   }
 
   document.querySelectorAll("[data-i18n]").forEach((node) => {
@@ -737,12 +744,18 @@ function renderPeople(people) {
           .map((keypoint) => `${keypoint.name} [${keypoint.point.map((value) => value.toFixed(0)).join(", ")}]`)
           .join("; ")
       : "";
+    const predictionText = person.prediction_ms
+      ? `predicted [${person.predicted_head_point.map((value) => value.toFixed(0)).join(", ")}] / ${person.prediction_ms}ms`
+      : "prediction off";
+    const velocityText = person.prediction_ms
+      ? `velocity [${person.velocity.map((value) => value.toFixed(1)).join(", ")}] px/s`
+      : "velocity -";
     item.innerHTML = `
       <strong>#${person.object_index} ${person.class_name || "person"}</strong>
       <span>bbox [${person.bbox.map((value) => value.toFixed(0)).join(", ")}]</span>
       <span>head [${person.head_point.map((value) => value.toFixed(0)).join(", ")}]</span>
-      <span>predicted [${(person.predicted_head_point || person.head_point).map((value) => value.toFixed(0)).join(", ")}] / ${person.prediction_ms || 0}ms</span>
-      <span>velocity [${(person.velocity || [0, 0]).map((value) => value.toFixed(1)).join(", ")}] px/s</span>
+      <span>${predictionText}</span>
+      <span>${velocityText}</span>
       <span>dx ${person.dx.toFixed(1)} / dy ${person.dy.toFixed(1)}</span>
       <span>confidence ${(person.confidence * 100).toFixed(1)}%</span>
       <span>${keypoints || "keypoints -"}</span>
@@ -769,9 +782,10 @@ function renderCompactDashboard(snapshot, people) {
   }
   const rows = people.slice(0, 8).map((person) => {
     const [x, y, w, h] = person.bbox;
-    const predicted = person.predicted_head_point || person.head_point;
-    const velocity = person.velocity || [0, 0];
-    return `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")} pred ${predicted.map((value) => value.toFixed(0)).join(",")} v ${velocity.map((value) => value.toFixed(0)).join(",")}`;
+    const prediction = person.prediction_ms
+      ? ` pred ${person.predicted_head_point.map((value) => value.toFixed(0)).join(",")} v ${person.velocity.map((value) => value.toFixed(0)).join(",")}`
+      : " pred off";
+    return `#${person.object_index} bbox ${x.toFixed(0)},${y.toFixed(0)},${w.toFixed(0)},${h.toFixed(0)} head ${person.head_point.map((value) => value.toFixed(0)).join(",")}${prediction}`;
   });
   setTextContent(els.compactPeopleList, rows.join("\n"));
 }
@@ -819,6 +833,7 @@ function currentInferenceOptions() {
     modelPath: els.modelPath.value.trim(),
     provider: els.providerSelect.value,
     activationKey: state.activationKey,
+    predictionEnabled: state.predictionEnabled,
     confidenceThreshold: Number.isFinite(confidence) ? confidence : DEFAULT_CONFIDENCE_THRESHOLD,
   };
 }
@@ -1252,6 +1267,12 @@ on(els.recordDatasetToggle, "change", (event) => {
   log("Dataset recording toggled", { enabled: state.recordDataset });
 });
 
+on(els.predictionToggle, "change", (event) => {
+  state.predictionEnabled = Boolean(event.target.checked);
+  localStorage.setItem("autoaim.predictionEnabled", state.predictionEnabled ? "true" : "false");
+  log("Prediction overlay toggled", { enabled: state.predictionEnabled });
+});
+
 on(els.startLiveBtn, "click", async () => {
   await runAction(t("liveStarting"), async () => {
     if (state.livePolling) {
@@ -1266,6 +1287,7 @@ on(els.startLiveBtn, "click", async () => {
     log("Live monitor start requested", {
       previewFrameEnabled: state.previewFrameEnabled,
       recordDataset: state.recordDataset,
+      predictionEnabled: state.predictionEnabled,
       screenId: els.screenSelect.value || state.selectedScreenId,
       provider: els.providerSelect.value,
       modelPath: els.modelPath.value.trim(),
