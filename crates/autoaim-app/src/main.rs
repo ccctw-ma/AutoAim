@@ -484,10 +484,16 @@ fn detect_with_cached_live_detector(
     let detector = cached
         .as_ref()
         .ok_or_else(|| "live detector cache is empty".to_string())?;
-    detector
-        .detector
-        .detect(frame)
-        .map_err(|error| error.to_string())
+    match detector.detector.detect(frame) {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            // Drop the cached detector so a GPU/DirectML session that entered an
+            // error state (device removed/hang) is rebuilt on the next frame
+            // instead of failing forever.
+            *cached = None;
+            Err(error.to_string())
+        }
+    }
 }
 
 fn native_inference_config(
