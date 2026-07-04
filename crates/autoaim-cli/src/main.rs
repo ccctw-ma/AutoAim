@@ -86,6 +86,7 @@ struct LiveDatasetReplayResult {
     total_ms: f64,
     mean_ms: f64,
     objects: usize,
+    object_frames: usize,
     poses: usize,
     keypoints: usize,
     zero_pose_frames: usize,
@@ -151,7 +152,7 @@ enum Command {
         /// Inference provider to exercise.
         #[arg(long, default_value = "directml")]
         provider: String,
-        /// Model path, defaults to models/movenet_lightning.onnx.
+        /// Model path, defaults to models/yolov8n.onnx.
         #[arg(long)]
         model_path: Option<PathBuf>,
         /// Number of inference iterations to run.
@@ -171,7 +172,7 @@ enum Command {
         /// Inference provider to exercise.
         #[arg(long, default_value = "directml")]
         provider: String,
-        /// Model path, defaults to models/movenet_lightning.onnx.
+        /// Model path, defaults to models/yolov8n.onnx.
         #[arg(long)]
         model_path: Option<PathBuf>,
         /// Confidence threshold for decoded poses.
@@ -436,7 +437,7 @@ fn gpu_smoke(
 ) -> Result<()> {
     let provider = NativeInferenceProvider::from_name(&provider)
         .with_context(|| format!("unsupported inference provider: {provider}"))?;
-    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/movenet_lightning.onnx"));
+    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/yolov8n.onnx"));
     if !model_path.is_file() {
         anyhow::bail!("model file not found: {}", model_path.display());
     }
@@ -467,9 +468,9 @@ fn gpu_smoke(
     }
 
     let output = last_output.expect("iterations is at least one");
-    if fail_on_zero_pose && output.poses.is_empty() {
+    if fail_on_zero_pose && output.poses.is_empty() && output.objects.is_empty() {
         anyhow::bail!(
-            "GPU inference ran but produced zero poses: {}",
+            "GPU inference ran but produced zero poses and zero objects: {}",
             output.model_status
         );
     }
@@ -519,7 +520,7 @@ fn replay_live_dataset(
 ) -> Result<()> {
     let provider = NativeInferenceProvider::from_name(&provider)
         .with_context(|| format!("unsupported inference provider: {provider}"))?;
-    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/movenet_lightning.onnx"));
+    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/yolov8n.onnx"));
     if !model_path.is_file() {
         anyhow::bail!("model file not found: {}", model_path.display());
     }
@@ -537,6 +538,7 @@ fn replay_live_dataset(
     let mut errors = 0usize;
     let mut total_ms = 0.0_f64;
     let mut objects = 0usize;
+    let mut object_frames = 0usize;
     let mut poses = 0usize;
     let mut keypoints = 0usize;
     let mut zero_pose_frames = 0usize;
@@ -577,6 +579,9 @@ fn replay_live_dataset(
                 if output.poses.is_empty() {
                     zero_pose_frames += 1;
                 }
+                if !output.objects.is_empty() {
+                    object_frames += 1;
+                }
                 objects += output.objects.len();
                 poses += output.poses.len();
                 keypoints += output
@@ -594,8 +599,8 @@ fn replay_live_dataset(
         }
     }
 
-    if fail_on_zero_pose && frames > 0 && poses == 0 {
-        anyhow::bail!("replay produced zero poses across {frames} frame(s)");
+    if fail_on_zero_pose && frames > 0 && poses == 0 && objects == 0 {
+        anyhow::bail!("replay produced zero poses and zero objects across {frames} frame(s)");
     }
     let result = LiveDatasetReplayResult {
         dataset_dir: dataset_dir.display().to_string(),
@@ -610,6 +615,7 @@ fn replay_live_dataset(
             total_ms / frames as f64
         },
         objects,
+        object_frames,
         poses,
         keypoints,
         zero_pose_frames,

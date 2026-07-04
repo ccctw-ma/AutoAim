@@ -20,6 +20,11 @@ use tract_onnx::prelude::*;
 pub const MOVENET_KEYPOINT_COUNT: usize = 17;
 pub const MOVENET_LIGHTNING_INPUT_SIZE: u32 = 192;
 pub const MOVENET_THUNDER_INPUT_SIZE: u32 = 256;
+pub const YOLOV8_INPUT_SIZE: u32 = 640;
+const YOLOV8_OUTPUT_CHANNELS: usize = 84;
+const YOLOV8_PERSON_CLASS_ID: usize = 0;
+const YOLOV8_NMS_IOU_THRESHOLD: f32 = 0.50;
+const YOLOV8_MAX_OBJECTS: usize = 20;
 const MOVENET_MAX_SCAN_POSES: usize = 4;
 const MOVENET_DUPLICATE_IOU_THRESHOLD: f32 = 0.35;
 pub const MOVENET_KEYPOINT_NAMES: [&str; MOVENET_KEYPOINT_COUNT] = [
@@ -149,6 +154,24 @@ pub trait PoseModel: fmt::Debug + Send {
     fn infer(&self, input: &MoveNetInput) -> Result<MoveNetRawOutput, InferenceError>;
 }
 
+trait ObjectModel: fmt::Debug + Send {
+    fn input_size(&self) -> u32;
+    fn runtime_name(&self) -> &'static str;
+    fn infer(&self, input: &YoloV8Input) -> Result<YoloV8RawOutput, InferenceError>;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct YoloV8Input {
+    pub size: u32,
+    pub rgb: Vec<f32>,
+    pub transform: FrameToModelTransform,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct YoloV8RawOutput {
+    pub values: Vec<f32>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct InferenceConfig {
     pub provider: NativeInferenceProvider,
@@ -244,6 +267,7 @@ pub trait PersonDetector {
 #[derive(Debug)]
 pub struct NativePersonDetector {
     config: InferenceConfig,
+    object_model: Option<Box<dyn ObjectModel>>,
     pose_model: Option<Box<dyn PoseModel>>,
 }
 
@@ -251,6 +275,7 @@ impl NativePersonDetector {
     pub fn new(config: InferenceConfig) -> Self {
         Self {
             config,
+            object_model: None,
             pose_model: None,
         }
     }
@@ -259,18 +284,37 @@ impl NativePersonDetector {
     fn with_pose_model(config: InferenceConfig, pose_model: Box<dyn PoseModel>) -> Self {
         Self {
             config,
+            object_model: None,
             pose_model: Some(pose_model),
         }
     }
 
     pub fn from_config(config: InferenceConfig) -> Result<Self, InferenceError> {
+        let object_model = load_object_model(&config)?;
         let pose_model = load_pose_model(&config)?;
-        Ok(Self { config, pose_model })
+        Ok(Self {
+            config,
+            object_model,
+            pose_model,
+        })
     }
 }
 
 impl PersonDetector for NativePersonDetector {
     fn detect(&self, frame: &CapturedFrame) -> Result<InferenceOutput, InferenceError> {
+        if let Some(object_model) = self.object_model.as_deref() {
+            let mut output =
+                detect_yolov8_people(frame, object_model, self.config.confidence_threshold)?;
+            output.provider = self.config.provider;
+            output.model_status = format!(
+                "YOLOv8 {} backend active; requested provider {}; {} person object(s) produced",
+                object_model.runtime_name(),
+                self.config.provider.as_str(),
+                output.objects.len()
+            );
+            return Ok(output);
+        }
+
         if let Some(pose_model) = self.pose_model.as_deref() {
             let mut output =
                 detect_movenet_poses(frame, pose_model, self.config.confidence_threshold)?;
@@ -308,6 +352,36 @@ impl PersonDetector for NativePersonDetector {
             model_status,
         })
     }
+}
+
+fn load_object_model(
+    config: &InferenceConfig,
+) -> Result<Option<Box<dyn ObjectModel>>, InferenceError> {
+    let Some(model_path) = config.model_path_buf().filter(|path| path.is_file()) else {
+        return Ok(None);
+    };
+    if !is_yolo_model_path(&model_path) {
+        return Ok(None);
+    }
+
+    #[cfg(feature = "ort-backend")]
+    {
+        if is_ort_provider(config.provider) && has_extension(&model_path, "onnx") {
+            let model = OrtYoloV8Model::from_path(&model_path, config.provider)?;
+            return Ok(Some(Box::new(model)));
+        }
+    }
+
+    Err(InferenceError::ModelLoad(
+        "YOLOv8 requires an ONNX model and ONNX Runtime provider".to_string(),
+    ))
+}
+
+fn is_yolo_model_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase().contains("yolo"))
+        .unwrap_or(false)
 }
 
 fn load_pose_model(config: &InferenceConfig) -> Result<Option<Box<dyn PoseModel>>, InferenceError> {
@@ -578,6 +652,88 @@ impl PoseModel for OrtMoveNetModel {
 }
 
 #[cfg(all(feature = "ort-backend", feature = "movenet"))]
+struct OrtYoloV8Model {
+    session: Mutex<Session>,
+    provider: NativeInferenceProvider,
+}
+
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
+impl fmt::Debug for OrtYoloV8Model {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OrtYoloV8Model")
+            .field("runtime", &self.runtime_name())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
+impl OrtYoloV8Model {
+    fn from_path(
+        path: impl AsRef<Path>,
+        provider: NativeInferenceProvider,
+    ) -> Result<Self, InferenceError> {
+        let execution_provider = ort_execution_provider(provider, path.as_ref());
+        let session = Session::builder()
+            .map_err(|error| InferenceError::ModelLoad(error.to_string()))?
+            .with_execution_providers([execution_provider])
+            .map_err(|error| InferenceError::ModelLoad(error.to_string()))?
+            .commit_from_file(path.as_ref())
+            .map_err(|error| InferenceError::ModelLoad(error.to_string()))?;
+
+        Ok(Self {
+            session: Mutex::new(session),
+            provider,
+        })
+    }
+}
+
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
+impl ObjectModel for OrtYoloV8Model {
+    fn input_size(&self) -> u32 {
+        YOLOV8_INPUT_SIZE
+    }
+
+    fn runtime_name(&self) -> &'static str {
+        match self.provider {
+            NativeInferenceProvider::DirectMl => "onnxruntime DirectML",
+            NativeInferenceProvider::Cuda => "onnxruntime CUDA",
+            NativeInferenceProvider::TensorRt => "onnxruntime TensorRT",
+            NativeInferenceProvider::Cpu => "onnxruntime CPU",
+        }
+    }
+
+    fn infer(&self, input: &YoloV8Input) -> Result<YoloV8RawOutput, InferenceError> {
+        let input_size = input.size as usize;
+        let input_tensor = OrtTensor::from_array((
+            [1_usize, 3_usize, input_size, input_size],
+            input.rgb.clone(),
+        ))
+        .map_err(|error| InferenceError::ModelRun(error.to_string()))?;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| InferenceError::ModelRun("YOLO session lock poisoned".to_string()))?;
+        let outputs = session
+            .run(ort::inputs![input_tensor])
+            .map_err(|error| InferenceError::ModelRun(error.to_string()))?;
+        if outputs.len() == 0 {
+            return Err(InferenceError::InvalidMoveNetOutput(
+                "YOLO model returned no output".to_string(),
+            ));
+        }
+        let output = &outputs[0];
+        let (_shape, values) = output
+            .try_extract_tensor::<f32>()
+            .map_err(|error| InferenceError::InvalidMoveNetOutput(error.to_string()))?;
+
+        Ok(YoloV8RawOutput {
+            values: values.to_vec(),
+        })
+    }
+}
+
+#[cfg(all(feature = "ort-backend", feature = "movenet"))]
 fn ort_execution_provider(
     provider: NativeInferenceProvider,
     model_path: &Path,
@@ -631,6 +787,152 @@ fn movenet_input_tensor(
                 .map_err(|error| InferenceError::ModelRun(error.to_string()))
         }
     }
+}
+
+fn detect_yolov8_people<M: ObjectModel + ?Sized>(
+    frame: &CapturedFrame,
+    model: &M,
+    threshold: f32,
+) -> Result<InferenceOutput, InferenceError> {
+    let input = prepare_yolov8_input(frame, model.input_size())?;
+    let raw = model.infer(&input)?;
+    let objects = decode_yolov8_people_output(&raw, &input.transform, input.size, threshold)?;
+    Ok(InferenceOutput {
+        objects,
+        poses: Vec::new(),
+        provider: NativeInferenceProvider::Cpu,
+        model_status: String::new(),
+    })
+}
+
+pub fn prepare_yolov8_input(
+    frame: &CapturedFrame,
+    input_size: u32,
+) -> Result<YoloV8Input, InferenceError> {
+    let [frame_width, frame_height] = frame.frame_size;
+    if input_size == 0
+        || frame_width == 0
+        || frame_height == 0
+        || frame.rgba.len() != frame_width as usize * frame_height as usize * 4
+    {
+        return Err(InferenceError::InvalidFrame(
+            "captured frame dimensions do not match RGBA buffer length",
+        ));
+    }
+
+    let scale =
+        (input_size as f32 / frame_width as f32).min(input_size as f32 / frame_height as f32);
+    let resized_width = frame_width as f32 * scale;
+    let resized_height = frame_height as f32 * scale;
+    let pad_x = (input_size as f32 - resized_width) / 2.0;
+    let pad_y = (input_size as f32 - resized_height) / 2.0;
+    let input_size = input_size as usize;
+    let plane = input_size * input_size;
+    let mut rgb = vec![114.0_f32 / 255.0; plane * 3];
+
+    for dst_y in 0..input_size {
+        for dst_x in 0..input_size {
+            let src_x = ((dst_x as f32 + 0.5 - pad_x) / scale).floor();
+            let src_y = ((dst_y as f32 + 0.5 - pad_y) / scale).floor();
+            if src_x < 0.0
+                || src_y < 0.0
+                || src_x >= frame_width as f32
+                || src_y >= frame_height as f32
+            {
+                continue;
+            }
+
+            let src_x = src_x as usize;
+            let src_y = src_y as usize;
+            let src_index = (src_y * frame_width as usize + src_x) * 4;
+            let dst_index = dst_y * input_size + dst_x;
+            rgb[dst_index] = frame.rgba[src_index] as f32 / 255.0;
+            rgb[plane + dst_index] = frame.rgba[src_index + 1] as f32 / 255.0;
+            rgb[plane * 2 + dst_index] = frame.rgba[src_index + 2] as f32 / 255.0;
+        }
+    }
+
+    Ok(YoloV8Input {
+        size: input_size as u32,
+        rgb,
+        transform: FrameToModelTransform {
+            frame_size: frame.frame_size,
+            source_origin: [0.0, 0.0],
+            source_size: [frame_width as f32, frame_height as f32],
+            screen_origin: frame.screen_origin,
+            screen_size: frame.screen_size,
+            scale,
+            pad_x,
+            pad_y,
+        },
+    })
+}
+
+pub fn decode_yolov8_people_output(
+    raw: &YoloV8RawOutput,
+    transform: &FrameToModelTransform,
+    input_size: u32,
+    threshold: f32,
+) -> Result<Vec<DetectionObject>, InferenceError> {
+    if raw.values.len() < YOLOV8_OUTPUT_CHANNELS || raw.values.len() % YOLOV8_OUTPUT_CHANNELS != 0 {
+        return Err(InferenceError::InvalidMoveNetOutput(format!(
+            "YOLOv8 output has {} values, expected channels divisible by {YOLOV8_OUTPUT_CHANNELS}",
+            raw.values.len()
+        )));
+    }
+    let anchor_count = raw.values.len() / YOLOV8_OUTPUT_CHANNELS;
+    let threshold = threshold.clamp(0.01, 0.95);
+    let mut candidates = Vec::new();
+    for anchor in 0..anchor_count {
+        let confidence = raw.values[(4 + YOLOV8_PERSON_CLASS_ID) * anchor_count + anchor];
+        if confidence < threshold {
+            continue;
+        }
+        let center_x = raw.values[anchor].clamp(0.0, input_size as f32);
+        let center_y = raw.values[anchor_count + anchor].clamp(0.0, input_size as f32);
+        let width = raw.values[anchor_count * 2 + anchor].max(1.0);
+        let height = raw.values[anchor_count * 3 + anchor].max(1.0);
+        let top_left =
+            transform.model_point_to_screen(center_x - width / 2.0, center_y - height / 2.0);
+        let bottom_right =
+            transform.model_point_to_screen(center_x + width / 2.0, center_y + height / 2.0);
+        let x1 = top_left[0].min(bottom_right[0]);
+        let y1 = top_left[1].min(bottom_right[1]);
+        let x2 = top_left[0].max(bottom_right[0]);
+        let y2 = top_left[1].max(bottom_right[1]);
+        let bbox = [x1, y1, (x2 - x1).max(1.0), (y2 - y1).max(1.0)];
+        candidates.push(DetectionObject {
+            class_name: "person".to_string(),
+            bbox,
+            head_bbox: None,
+            head_point: Some([bbox[0] + bbox[2] * 0.5, bbox[1] + bbox[3] * 0.18]),
+            confidence,
+            track_id: None,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut selected = Vec::new();
+    for object in candidates {
+        if selected.iter().any(|existing: &DetectionObject| {
+            bbox_iou(existing.bbox, object.bbox) >= YOLOV8_NMS_IOU_THRESHOLD
+        }) {
+            continue;
+        }
+        selected.push(object);
+        if selected.len() >= YOLOV8_MAX_OBJECTS {
+            break;
+        }
+    }
+    for (index, object) in selected.iter_mut().enumerate() {
+        object.track_id = Some(index as u64 + 1);
+    }
+    Ok(selected)
 }
 
 pub fn detect_movenet_poses<M: PoseModel + ?Sized>(

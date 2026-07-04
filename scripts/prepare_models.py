@@ -12,6 +12,11 @@ from zipfile import ZipFile
 
 
 REQUIRED_MODELS = {
+    "yolov8n.onnx": {
+        "sha256": "18e69ffef4db38463f7b0c12f66aca599f3ec0d062675af536a25ea1860601d0",
+        "env_url": "AUTOAIM_YOLOV8_ONNX_URL",
+        "default_url": "https://www.modelscope.cn/models/cix/ai_model_hub_25_Q3/resolve/master/models/ComputeVision/Object_Detection/onnx_yolov8_n/model/yolov8n.onnx",
+    },
     "movenet_lightning.onnx": {
         "sha256": "65ae8c693f8c4649101255221f66f3fed7b7ba977a3dce0bbd68663ce035982e",
         "env_url": "AUTOAIM_MOVENET_ONNX_URL",
@@ -106,6 +111,7 @@ def prepare_models(args: argparse.Namespace) -> None:
             missing -= extracted
 
     direct_urls = {
+        "yolov8n.onnx": args.yolo_url or os.environ.get("AUTOAIM_YOLOV8_ONNX_URL") or REQUIRED_MODELS["yolov8n.onnx"]["default_url"],
         "movenet_lightning.onnx": args.onnx_url or os.environ.get("AUTOAIM_MOVENET_ONNX_URL"),
         "movenet_lightning.tflite": args.tflite_url or os.environ.get("AUTOAIM_MOVENET_TFLITE_URL"),
     }
@@ -133,10 +139,11 @@ def prepare_models(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare local MoveNet model files.")
+    parser = argparse.ArgumentParser(description="Prepare local AutoAim model files.")
     parser.add_argument("--models-dir", default="models")
     parser.add_argument("--package", help="Existing AutoAimReview-windows-x64.zip to extract models from")
     parser.add_argument("--package-url", help="URL of an AutoAimReview-windows-x64.zip release asset")
+    parser.add_argument("--yolo-url", help="Direct URL for yolov8n.onnx")
     parser.add_argument("--onnx-url", help="Direct URL for movenet_lightning.onnx")
     parser.add_argument("--tflite-url", help="Direct URL for movenet_lightning.tflite")
     args = parser.parse_args()

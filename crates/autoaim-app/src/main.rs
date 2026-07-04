@@ -40,6 +40,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
+const BUNDLED_YOLOV8_ONNX_MODEL: &str = "models/yolov8n.onnx";
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
 const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
@@ -600,10 +601,14 @@ fn resolve_model_path(model_path: Option<String>, prefer_onnx: bool) -> Option<S
             .map(path_to_string);
     }
 
-    let candidates = if prefer_onnx {
-        [BUNDLED_MOVENET_ONNX_MODEL, BUNDLED_MOVENET_TFLITE_MODEL]
+    let candidates: &[&str] = if prefer_onnx {
+        &[
+            BUNDLED_YOLOV8_ONNX_MODEL,
+            BUNDLED_MOVENET_ONNX_MODEL,
+            BUNDLED_MOVENET_TFLITE_MODEL,
+        ]
     } else {
-        [BUNDLED_MOVENET_TFLITE_MODEL, BUNDLED_MOVENET_ONNX_MODEL]
+        &[BUNDLED_MOVENET_TFLITE_MODEL, BUNDLED_MOVENET_ONNX_MODEL]
     };
 
     candidates
