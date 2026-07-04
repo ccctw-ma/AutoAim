@@ -12,6 +12,10 @@ from zipfile import ZipFile
 
 
 REQUIRED_MODELS = {
+    "yolov8n-pose.onnx": {
+        "sha256": "c934cb89cdea04ec166987f146268d524e15a93e8a8227d45efaf35faa0a840b",
+        "env_url": "AUTOAIM_YOLOV8_POSE_ONNX_URL",
+    },
     "yolov8n.onnx": {
         "sha256": "18e69ffef4db38463f7b0c12f66aca599f3ec0d062675af536a25ea1860601d0",
         "env_url": "AUTOAIM_YOLOV8_ONNX_URL",
@@ -111,6 +115,7 @@ def prepare_models(args: argparse.Namespace) -> None:
             missing -= extracted
 
     direct_urls = {
+        "yolov8n-pose.onnx": args.yolo_pose_url or os.environ.get("AUTOAIM_YOLOV8_POSE_ONNX_URL"),
         "yolov8n.onnx": args.yolo_url or os.environ.get("AUTOAIM_YOLOV8_ONNX_URL") or REQUIRED_MODELS["yolov8n.onnx"]["default_url"],
         "movenet_lightning.onnx": args.onnx_url or os.environ.get("AUTOAIM_MOVENET_ONNX_URL"),
         "movenet_lightning.tflite": args.tflite_url or os.environ.get("AUTOAIM_MOVENET_TFLITE_URL"),
@@ -131,8 +136,8 @@ def prepare_models(args: argparse.Namespace) -> None:
         raise FileNotFoundError(
             "missing model files: "
             f"{names}. Copy them into models/, pass --package with a previous "
-            "AutoAimReview-windows-x64.zip, or set AUTOAIM_MOVENET_ONNX_URL and "
-            "AUTOAIM_MOVENET_TFLITE_URL."
+            "AutoAimReview-windows-x64.zip, or set AUTOAIM_YOLOV8_POSE_ONNX_URL, "
+            "AUTOAIM_MOVENET_ONNX_URL, and AUTOAIM_MOVENET_TFLITE_URL."
         )
 
     print(f"models ready: {models_dir}")
@@ -143,6 +148,7 @@ def main() -> int:
     parser.add_argument("--models-dir", default="models")
     parser.add_argument("--package", help="Existing AutoAimReview-windows-x64.zip to extract models from")
     parser.add_argument("--package-url", help="URL of an AutoAimReview-windows-x64.zip release asset")
+    parser.add_argument("--yolo-pose-url", help="Direct URL for yolov8n-pose.onnx")
     parser.add_argument("--yolo-url", help="Direct URL for yolov8n.onnx")
     parser.add_argument("--onnx-url", help="Direct URL for movenet_lightning.onnx")
     parser.add_argument("--tflite-url", help="Direct URL for movenet_lightning.tflite")

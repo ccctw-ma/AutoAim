@@ -21,7 +21,9 @@ pub const MOVENET_KEYPOINT_COUNT: usize = 17;
 pub const MOVENET_LIGHTNING_INPUT_SIZE: u32 = 192;
 pub const MOVENET_THUNDER_INPUT_SIZE: u32 = 256;
 pub const YOLOV8_INPUT_SIZE: u32 = 640;
-const YOLOV8_OUTPUT_CHANNELS: usize = 84;
+const YOLOV8_DETECT_OUTPUT_CHANNELS: usize = 84;
+const YOLOV8_POSE_OUTPUT_CHANNELS: usize = 56;
+const YOLOV8_POSE_KEYPOINT_OFFSET: usize = 5;
 const YOLOV8_PERSON_CLASS_ID: usize = 0;
 const YOLOV8_NMS_IOU_THRESHOLD: f32 = 0.50;
 const YOLOV8_MAX_OBJECTS: usize = 20;
@@ -169,7 +171,14 @@ pub struct YoloV8Input {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct YoloV8RawOutput {
+    pub shape: Vec<usize>,
     pub values: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct YoloV8DecodedOutput {
+    pub objects: Vec<DetectionObject>,
+    pub poses: Vec<PoseEstimate>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -307,9 +316,10 @@ impl PersonDetector for NativePersonDetector {
                 detect_yolov8_people(frame, object_model, self.config.confidence_threshold)?;
             output.provider = self.config.provider;
             output.model_status = format!(
-                "YOLOv8 {} backend active; requested provider {}; {} person object(s) produced",
+                "YOLOv8 {} backend active; requested provider {}; {} pose(s) and {} person object(s) produced",
                 object_model.runtime_name(),
                 self.config.provider.as_str(),
+                output.poses.len(),
                 output.objects.len()
             );
             return Ok(output);
@@ -723,11 +733,21 @@ impl ObjectModel for OrtYoloV8Model {
             ));
         }
         let output = &outputs[0];
-        let (_shape, values) = output
+        let (shape, values) = output
             .try_extract_tensor::<f32>()
             .map_err(|error| InferenceError::InvalidMoveNetOutput(error.to_string()))?;
+        let mut shape_dims = Vec::with_capacity(shape.len());
+        for dim in shape.iter() {
+            if *dim < 0 {
+                return Err(InferenceError::InvalidMoveNetOutput(format!(
+                    "YOLO output has dynamic dimension {dim}"
+                )));
+            }
+            shape_dims.push(*dim as usize);
+        }
 
         Ok(YoloV8RawOutput {
+            shape: shape_dims,
             values: values.to_vec(),
         })
     }
@@ -796,10 +816,10 @@ fn detect_yolov8_people<M: ObjectModel + ?Sized>(
 ) -> Result<InferenceOutput, InferenceError> {
     let input = prepare_yolov8_input(frame, model.input_size())?;
     let raw = model.infer(&input)?;
-    let objects = decode_yolov8_people_output(&raw, &input.transform, input.size, threshold)?;
+    let decoded = decode_yolov8_people_output(&raw, &input.transform, input.size, threshold)?;
     Ok(InferenceOutput {
-        objects,
-        poses: Vec::new(),
+        objects: decoded.objects,
+        poses: decoded.poses,
         provider: NativeInferenceProvider::Cpu,
         model_status: String::new(),
     })
@@ -873,25 +893,23 @@ pub fn decode_yolov8_people_output(
     transform: &FrameToModelTransform,
     input_size: u32,
     threshold: f32,
-) -> Result<Vec<DetectionObject>, InferenceError> {
-    if raw.values.len() < YOLOV8_OUTPUT_CHANNELS || raw.values.len() % YOLOV8_OUTPUT_CHANNELS != 0 {
-        return Err(InferenceError::InvalidMoveNetOutput(format!(
-            "YOLOv8 output has {} values, expected channels divisible by {YOLOV8_OUTPUT_CHANNELS}",
-            raw.values.len()
-        )));
-    }
-    let anchor_count = raw.values.len() / YOLOV8_OUTPUT_CHANNELS;
+) -> Result<YoloV8DecodedOutput, InferenceError> {
+    let layout = yolo_output_layout(raw)?;
     let threshold = threshold.clamp(0.01, 0.95);
     let mut candidates = Vec::new();
-    for anchor in 0..anchor_count {
-        let confidence = raw.values[(4 + YOLOV8_PERSON_CLASS_ID) * anchor_count + anchor];
+    for anchor in 0..layout.anchors {
+        let confidence_channel = match layout.kind {
+            YoloV8OutputKind::Detect => 4 + YOLOV8_PERSON_CLASS_ID,
+            YoloV8OutputKind::Pose => 4,
+        };
+        let confidence = yolo_value(raw, layout, confidence_channel, anchor).clamp(0.0, 1.0);
         if confidence < threshold {
             continue;
         }
-        let center_x = raw.values[anchor].clamp(0.0, input_size as f32);
-        let center_y = raw.values[anchor_count + anchor].clamp(0.0, input_size as f32);
-        let width = raw.values[anchor_count * 2 + anchor].max(1.0);
-        let height = raw.values[anchor_count * 3 + anchor].max(1.0);
+        let center_x = yolo_value(raw, layout, 0, anchor).clamp(0.0, input_size as f32);
+        let center_y = yolo_value(raw, layout, 1, anchor).clamp(0.0, input_size as f32);
+        let width = yolo_value(raw, layout, 2, anchor).max(1.0);
+        let height = yolo_value(raw, layout, 3, anchor).max(1.0);
         let top_left =
             transform.model_point_to_screen(center_x - width / 2.0, center_y - height / 2.0);
         let bottom_right =
@@ -901,38 +919,197 @@ pub fn decode_yolov8_people_output(
         let x2 = top_left[0].max(bottom_right[0]);
         let y2 = top_left[1].max(bottom_right[1]);
         let bbox = [x1, y1, (x2 - x1).max(1.0), (y2 - y1).max(1.0)];
-        candidates.push(DetectionObject {
+        let object = DetectionObject {
             class_name: "person".to_string(),
             bbox,
             head_bbox: None,
             head_point: Some([bbox[0] + bbox[2] * 0.5, bbox[1] + bbox[3] * 0.18]),
             confidence,
             track_id: None,
-        });
+        };
+        let pose = if layout.kind == YoloV8OutputKind::Pose {
+            Some(yolov8_pose_from_anchor(
+                raw, layout, anchor, transform, input_size, bbox, confidence,
+            ))
+        } else {
+            None
+        };
+        candidates.push(YoloV8Candidate { object, pose });
     }
 
     candidates.sort_by(|left, right| {
         right
+            .object
             .confidence
-            .partial_cmp(&left.confidence)
+            .partial_cmp(&left.object.confidence)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut selected = Vec::new();
-    for object in candidates {
-        if selected.iter().any(|existing: &DetectionObject| {
-            bbox_iou(existing.bbox, object.bbox) >= YOLOV8_NMS_IOU_THRESHOLD
+    for candidate in candidates {
+        if selected.iter().any(|existing: &YoloV8Candidate| {
+            bbox_iou(existing.object.bbox, candidate.object.bbox) >= YOLOV8_NMS_IOU_THRESHOLD
         }) {
             continue;
         }
-        selected.push(object);
+        selected.push(candidate);
         if selected.len() >= YOLOV8_MAX_OBJECTS {
             break;
         }
     }
-    for (index, object) in selected.iter_mut().enumerate() {
-        object.track_id = Some(index as u64 + 1);
+    for (index, candidate) in selected.iter_mut().enumerate() {
+        candidate.object.track_id = Some(index as u64 + 1);
     }
-    Ok(selected)
+    let mut objects = Vec::with_capacity(selected.len());
+    let mut poses = Vec::new();
+    for candidate in selected {
+        objects.push(candidate.object);
+        if let Some(pose) = candidate.pose {
+            poses.push(pose);
+        }
+    }
+    Ok(YoloV8DecodedOutput { objects, poses })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct YoloV8Candidate {
+    object: DetectionObject,
+    pose: Option<PoseEstimate>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YoloV8OutputKind {
+    Detect,
+    Pose,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct YoloV8OutputLayout {
+    kind: YoloV8OutputKind,
+    channels: usize,
+    anchors: usize,
+    channels_first: bool,
+}
+
+fn yolo_output_layout(raw: &YoloV8RawOutput) -> Result<YoloV8OutputLayout, InferenceError> {
+    let values_len = raw.values.len();
+    if values_len == 0 {
+        return Err(InferenceError::InvalidMoveNetOutput(
+            "YOLOv8 output is empty".to_string(),
+        ));
+    }
+
+    let dims = raw
+        .shape
+        .iter()
+        .copied()
+        .filter(|dim| *dim > 1)
+        .collect::<Vec<_>>();
+    for pair in dims.windows(2).rev() {
+        if let Some(layout) = yolo_layout_from_dims(pair[0], pair[1], values_len) {
+            return Ok(layout);
+        }
+    }
+
+    let detect_match = values_len % YOLOV8_DETECT_OUTPUT_CHANNELS == 0;
+    let pose_match = values_len % YOLOV8_POSE_OUTPUT_CHANNELS == 0;
+    match (detect_match, pose_match) {
+        (true, false) => Ok(YoloV8OutputLayout {
+            kind: YoloV8OutputKind::Detect,
+            channels: YOLOV8_DETECT_OUTPUT_CHANNELS,
+            anchors: values_len / YOLOV8_DETECT_OUTPUT_CHANNELS,
+            channels_first: true,
+        }),
+        (false, true) => Ok(YoloV8OutputLayout {
+            kind: YoloV8OutputKind::Pose,
+            channels: YOLOV8_POSE_OUTPUT_CHANNELS,
+            anchors: values_len / YOLOV8_POSE_OUTPUT_CHANNELS,
+            channels_first: true,
+        }),
+        _ => Err(InferenceError::InvalidMoveNetOutput(format!(
+            "YOLOv8 output has shape {:?} and {} values; expected 84-channel detect or 56-channel pose output",
+            raw.shape, values_len
+        ))),
+    }
+}
+
+fn yolo_layout_from_dims(
+    left: usize,
+    right: usize,
+    values_len: usize,
+) -> Option<YoloV8OutputLayout> {
+    if left.checked_mul(right)? != values_len {
+        return None;
+    }
+    if let Some(kind) = yolo_kind_from_channels(left) {
+        return Some(YoloV8OutputLayout {
+            kind,
+            channels: left,
+            anchors: right,
+            channels_first: true,
+        });
+    }
+    if let Some(kind) = yolo_kind_from_channels(right) {
+        return Some(YoloV8OutputLayout {
+            kind,
+            channels: right,
+            anchors: left,
+            channels_first: false,
+        });
+    }
+    None
+}
+
+fn yolo_kind_from_channels(channels: usize) -> Option<YoloV8OutputKind> {
+    match channels {
+        YOLOV8_DETECT_OUTPUT_CHANNELS => Some(YoloV8OutputKind::Detect),
+        YOLOV8_POSE_OUTPUT_CHANNELS => Some(YoloV8OutputKind::Pose),
+        _ => None,
+    }
+}
+
+fn yolo_value(
+    raw: &YoloV8RawOutput,
+    layout: YoloV8OutputLayout,
+    channel: usize,
+    anchor: usize,
+) -> f32 {
+    if layout.channels_first {
+        raw.values[channel * layout.anchors + anchor]
+    } else {
+        raw.values[anchor * layout.channels + channel]
+    }
+}
+
+fn yolov8_pose_from_anchor(
+    raw: &YoloV8RawOutput,
+    layout: YoloV8OutputLayout,
+    anchor: usize,
+    transform: &FrameToModelTransform,
+    input_size: u32,
+    bbox: [f32; 4],
+    confidence: f32,
+) -> PoseEstimate {
+    let mut keypoints = Vec::with_capacity(MOVENET_KEYPOINT_COUNT);
+    for index in 0..MOVENET_KEYPOINT_COUNT {
+        let offset = YOLOV8_POSE_KEYPOINT_OFFSET + index * 3;
+        let x = yolo_value(raw, layout, offset, anchor).clamp(0.0, input_size as f32);
+        let y = yolo_value(raw, layout, offset + 1, anchor).clamp(0.0, input_size as f32);
+        let score = yolo_value(raw, layout, offset + 2, anchor).clamp(0.0, 1.0);
+        keypoints.push(PoseKeypoint {
+            index,
+            name: MOVENET_KEYPOINT_NAMES[index],
+            point: transform.model_point_to_screen(x, y),
+            score,
+        });
+    }
+    let head_point = head_point_from_keypoints(&keypoints)
+        .unwrap_or([bbox[0] + bbox[2] * 0.5, bbox[1] + bbox[3] * 0.18]);
+    PoseEstimate {
+        keypoints,
+        bbox,
+        head_point,
+        confidence,
+    }
 }
 
 pub fn detect_movenet_poses<M: PoseModel + ?Sized>(
@@ -1576,6 +1753,26 @@ mod tests {
         MoveNetRawOutput { values }
     }
 
+    fn identity_yolo_transform(input_size: u32) -> FrameToModelTransform {
+        FrameToModelTransform {
+            frame_size: [input_size, input_size],
+            source_origin: [0.0, 0.0],
+            source_size: [input_size as f32, input_size as f32],
+            screen_origin: [0, 0],
+            screen_size: [input_size, input_size],
+            scale: 1.0,
+            pad_x: 0.0,
+            pad_y: 0.0,
+        }
+    }
+
+    fn assert_near(left: f32, right: f32) {
+        assert!(
+            (left - right).abs() < 0.01,
+            "expected {left} to be near {right}"
+        );
+    }
+
     #[test]
     fn provider_names_parse_and_format_all_supported_backends() {
         assert_eq!(
@@ -1650,6 +1847,75 @@ mod tests {
             .model_status
             .contains("MoveNet custom pose model backend active; requested provider cpu"));
         assert!(output.model_status.contains("scanned"));
+    }
+
+    #[test]
+    fn yolov8_detect_output_decodes_person_objects_from_shape() {
+        let anchor_count = 2;
+        let mut values = vec![0.0; YOLOV8_DETECT_OUTPUT_CHANNELS * anchor_count];
+        values[0] = 50.0;
+        values[anchor_count] = 60.0;
+        values[anchor_count * 2] = 20.0;
+        values[anchor_count * 3] = 40.0;
+        values[(4 + YOLOV8_PERSON_CLASS_ID) * anchor_count] = 0.80;
+        values[(4 + YOLOV8_PERSON_CLASS_ID) * anchor_count + 1] = 0.10;
+
+        let decoded = decode_yolov8_people_output(
+            &YoloV8RawOutput {
+                shape: vec![1, YOLOV8_DETECT_OUTPUT_CHANNELS, anchor_count],
+                values,
+            },
+            &identity_yolo_transform(100),
+            100,
+            0.25,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.objects.len(), 1);
+        assert!(decoded.poses.is_empty());
+        assert_near(decoded.objects[0].bbox[0], 40.0);
+        assert_near(decoded.objects[0].bbox[1], 40.0);
+        assert_near(decoded.objects[0].bbox[2], 20.0);
+        assert_near(decoded.objects[0].bbox[3], 40.0);
+        assert_eq!(decoded.objects[0].track_id, Some(1));
+    }
+
+    #[test]
+    fn yolov8_pose_output_decodes_keypoints_from_shape() {
+        let anchor_count = 1;
+        let mut values = vec![0.0; YOLOV8_POSE_OUTPUT_CHANNELS * anchor_count];
+        values[0] = 50.0;
+        values[1] = 60.0;
+        values[2] = 20.0;
+        values[3] = 40.0;
+        values[4] = 0.90;
+        for index in 0..MOVENET_KEYPOINT_COUNT {
+            let offset = YOLOV8_POSE_KEYPOINT_OFFSET + index * 3;
+            values[offset] = 50.0 + index as f32;
+            values[offset + 1] = 40.0 + index as f32;
+            values[offset + 2] = 0.80;
+        }
+
+        let decoded = decode_yolov8_people_output(
+            &YoloV8RawOutput {
+                shape: vec![1, YOLOV8_POSE_OUTPUT_CHANNELS, anchor_count],
+                values,
+            },
+            &identity_yolo_transform(100),
+            100,
+            0.25,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.objects.len(), 1);
+        assert_eq!(decoded.poses.len(), 1);
+        assert_eq!(decoded.poses[0].keypoints.len(), MOVENET_KEYPOINT_COUNT);
+        assert_eq!(decoded.poses[0].keypoints[0].name, "nose");
+        assert_near(decoded.poses[0].keypoints[0].point[0], 50.0);
+        assert_near(decoded.poses[0].keypoints[0].point[1], 40.0);
+        assert_near(decoded.poses[0].keypoints[0].score, 0.80);
+        assert_near(decoded.poses[0].bbox[0], decoded.objects[0].bbox[0]);
+        assert_near(decoded.poses[0].bbox[1], decoded.objects[0].bbox[1]);
     }
 
     #[test]

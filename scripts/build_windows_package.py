@@ -318,6 +318,7 @@ def build_package(args: argparse.Namespace) -> None:
     copy_file(repo / "windows" / "update.ps1", windows_dir / "update.ps1")
     copy_file(repo / "assets" / "logo.svg", assets_dir / "logo.svg")
     write_logo_ico(assets_dir / "logo.ico")
+    copy_required_model(repo, "yolov8n-pose.onnx", models_dir / "yolov8n-pose.onnx")
     copy_required_model(repo, "yolov8n.onnx", models_dir / "yolov8n.onnx")
     copy_required_model(repo, "movenet_lightning.tflite", models_dir / "movenet_lightning.tflite")
     copy_required_model(repo, "movenet_lightning.onnx", models_dir / "movenet_lightning.onnx")

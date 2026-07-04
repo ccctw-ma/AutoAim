@@ -152,7 +152,7 @@ enum Command {
         /// Inference provider to exercise.
         #[arg(long, default_value = "directml")]
         provider: String,
-        /// Model path, defaults to models/yolov8n.onnx.
+        /// Model path, defaults to models/yolov8n-pose.onnx when present, else models/yolov8n.onnx.
         #[arg(long)]
         model_path: Option<PathBuf>,
         /// Number of inference iterations to run.
@@ -172,7 +172,7 @@ enum Command {
         /// Inference provider to exercise.
         #[arg(long, default_value = "directml")]
         provider: String,
-        /// Model path, defaults to models/yolov8n.onnx.
+        /// Model path, defaults to models/yolov8n-pose.onnx when present, else models/yolov8n.onnx.
         #[arg(long)]
         model_path: Option<PathBuf>,
         /// Confidence threshold for decoded poses.
@@ -428,6 +428,15 @@ fn bench_detector(image_dir: PathBuf, iterations: usize) -> Result<()> {
     Ok(())
 }
 
+fn default_live_model_path() -> PathBuf {
+    let pose_model = PathBuf::from("models/yolov8n-pose.onnx");
+    if pose_model.is_file() {
+        pose_model
+    } else {
+        PathBuf::from("models/yolov8n.onnx")
+    }
+}
+
 fn gpu_smoke(
     provider: String,
     model_path: Option<PathBuf>,
@@ -437,7 +446,7 @@ fn gpu_smoke(
 ) -> Result<()> {
     let provider = NativeInferenceProvider::from_name(&provider)
         .with_context(|| format!("unsupported inference provider: {provider}"))?;
-    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/yolov8n.onnx"));
+    let model_path = model_path.unwrap_or_else(default_live_model_path);
     if !model_path.is_file() {
         anyhow::bail!("model file not found: {}", model_path.display());
     }
@@ -520,7 +529,7 @@ fn replay_live_dataset(
 ) -> Result<()> {
     let provider = NativeInferenceProvider::from_name(&provider)
         .with_context(|| format!("unsupported inference provider: {provider}"))?;
-    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/yolov8n.onnx"));
+    let model_path = model_path.unwrap_or_else(default_live_model_path);
     if !model_path.is_file() {
         anyhow::bail!("model file not found: {}", model_path.display());
     }
