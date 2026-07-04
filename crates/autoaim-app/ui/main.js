@@ -241,6 +241,7 @@ const LIVE_STUCK_POLL_MS = 600;
 const LIVE_TRANSIENT_ERROR_DELAY_MS = 64;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
 const UPDATE_CHECK_TIMEOUT_MS = 8000;
+const DEFAULT_CONFIDENCE_THRESHOLD = 0.35;
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
 const SKELETON_CONNECTIONS = [
   ["nose", "left_eye"],
@@ -473,12 +474,12 @@ function setCompactMode(enabled) {
 
 async function copyDiagnostics() {
   requireTauri();
-  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+  const confidence = Number.parseFloat(els.confidenceInput.value || String(DEFAULT_CONFIDENCE_THRESHOLD));
   const context = await invoke("diagnostics_context", {
     selectedScreenId: els.screenSelect.value || state.selectedScreenId || null,
     provider: els.providerSelect.value,
     modelPath: els.modelPath.value.trim(),
-    confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+    confidenceThreshold: Number.isFinite(confidence) ? confidence : DEFAULT_CONFIDENCE_THRESHOLD,
   });
   const payload = {
     generated_at: new Date().toISOString(),
@@ -809,12 +810,12 @@ function setPreviewFrameEnabled(enabled) {
 }
 
 function currentInferenceOptions() {
-  const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+  const confidence = Number.parseFloat(els.confidenceInput.value || String(DEFAULT_CONFIDENCE_THRESHOLD));
   return {
     modelPath: els.modelPath.value.trim(),
     provider: els.providerSelect.value,
     activationKey: state.activationKey,
-    confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+    confidenceThreshold: Number.isFinite(confidence) ? confidence : DEFAULT_CONFIDENCE_THRESHOLD,
   };
 }
 
@@ -1383,12 +1384,12 @@ on(els.writeBtn, "click", async () => {
 
 on(els.showRuntimeBtn, "click", async () => {
   await runAction(t("runtimeReady"), async () => {
-    const confidence = Number.parseFloat(els.confidenceInput.value || "0.25");
+    const confidence = Number.parseFloat(els.confidenceInput.value || String(DEFAULT_CONFIDENCE_THRESHOLD));
     const config = await invoke("inference_runtime_config", {
       provider: els.providerSelect.value,
       modelPath: els.modelPath.value.trim(),
       deviceId: 0,
-      confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
+      confidenceThreshold: Number.isFinite(confidence) ? confidence : DEFAULT_CONFIDENCE_THRESHOLD,
     });
     setStatus(t("runtimeReady"), "success");
     log(t("runtimeReady"), config);

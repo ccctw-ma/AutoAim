@@ -21,6 +21,8 @@ use autoaim_ipc::{
 use autoaim_runtime::{JsonlEventWriter, ReviewPipeline};
 use serde::Serialize;
 #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
 use std::process::Command;
 use std::{
     collections::HashMap,
@@ -48,6 +50,7 @@ const BUNDLED_YOLOV8_POSE_ONNX_MODEL: &str = "models/yolov8n-pose.onnx";
 const BUNDLED_YOLOV8_ONNX_MODEL: &str = "models/yolov8n.onnx";
 const LIVE_CAPTURE_MAX_FRAME_SIZE: [u32; 2] = [1920, 1080];
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
+const DEFAULT_LIVE_CONFIDENCE_THRESHOLD: f32 = 0.35;
 const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
 const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
 const LIVE_CAPTURE_TIMEOUT_MS: u64 = 1000;
@@ -60,7 +63,13 @@ static LIVE_ACTIVATION_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 #[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
 const VK_MENU: i32 = 0x12;
+#[cfg(target_os = "windows")]
+const VK_LMENU: i32 = 0xA4;
+#[cfg(target_os = "windows")]
+const VK_RMENU: i32 = 0xA5;
 #[cfg(target_os = "windows")]
 const VK_SHIFT: i32 = 0x10;
 #[cfg(target_os = "windows")]
@@ -69,6 +78,10 @@ const VK_CONTROL: i32 = 0x11;
 const VK_SPACE: i32 = 0x20;
 #[cfg(target_os = "windows")]
 const VK_RBUTTON: i32 = 0x02;
+#[cfg(target_os = "windows")]
+const VK_XBUTTON1: i32 = 0x05;
+#[cfg(target_os = "windows")]
+const VK_XBUTTON2: i32 = 0x06;
 
 #[cfg(target_os = "windows")]
 #[link(name = "user32")]
@@ -375,7 +388,7 @@ fn inference_runtime_config(
         provider,
         resolve_model_path(model_path, provider_prefers_onnx(provider)),
         device_id,
-        confidence_threshold.unwrap_or(0.25),
+        confidence_threshold.unwrap_or(DEFAULT_LIVE_CONFIDENCE_THRESHOLD),
     ))
 }
 
@@ -697,7 +710,12 @@ fn build_live_idle_snapshot(
 
 #[cfg(target_os = "windows")]
 fn live_activation_pressed(activation_key: &str) -> bool {
-    unsafe { GetAsyncKeyState(activation_key_code(activation_key)) < 0 }
+    if activation_key.eq_ignore_ascii_case("always_on") {
+        return true;
+    }
+    activation_key_codes(activation_key)
+        .iter()
+        .any(|code| unsafe { GetAsyncKeyState(*code) < 0 })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -706,13 +724,15 @@ fn live_activation_pressed(_activation_key: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn activation_key_code(value: &str) -> i32 {
+fn activation_key_codes(value: &str) -> &'static [i32] {
     match value.to_ascii_lowercase().as_str() {
-        "shift" => VK_SHIFT,
-        "control" | "ctrl" => VK_CONTROL,
-        "space" => VK_SPACE,
-        "right_mouse" | "mouse_right" | "right-button" => VK_RBUTTON,
-        _ => VK_MENU,
+        "shift" => &[VK_SHIFT],
+        "control" | "ctrl" => &[VK_CONTROL],
+        "space" => &[VK_SPACE],
+        "right_mouse" | "mouse_right" | "right-button" => &[VK_RBUTTON],
+        "mouse4" | "xbutton1" | "x_button_1" => &[VK_XBUTTON1],
+        "mouse5" | "xbutton2" | "x_button_2" => &[VK_XBUTTON2],
+        _ => &[VK_MENU, VK_LMENU, VK_RMENU],
     }
 }
 
@@ -722,6 +742,9 @@ fn activation_key_label(value: &str) -> &'static str {
         "control" | "ctrl" => "Ctrl",
         "space" => "Space",
         "right_mouse" | "mouse_right" | "right-button" => "Right Mouse",
+        "mouse4" | "xbutton1" | "x_button_1" => "Mouse4",
+        "mouse5" | "xbutton2" | "x_button_2" => "Mouse5",
+        "always_on" => "Always on",
         _ => "Alt",
     }
 }
@@ -879,7 +902,7 @@ fn native_inference_config(
     Ok(NativeInferenceConfig::new(
         provider,
         resolve_model_path(model_path, native_provider_prefers_onnx(provider)),
-        confidence_threshold.unwrap_or(0.25),
+        confidence_threshold.unwrap_or(DEFAULT_LIVE_CONFIDENCE_THRESHOLD),
     ))
 }
 
@@ -1070,6 +1093,13 @@ fn json_escape(value: &str) -> String {
         .replace('\r', "\\r")
 }
 
+#[cfg(target_os = "windows")]
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 fn sample_system_telemetry(state: &SystemTelemetryState) -> SystemTelemetry {
     match state.cache.lock() {
         Ok(cache) => cache,
@@ -1187,7 +1217,7 @@ fn sample_cpu_times() -> Option<CpuTimesSample> {
 
 #[cfg(target_os = "windows")]
 fn query_gpu_telemetry() -> Result<GpuTelemetrySample, String> {
-    let output = Command::new("nvidia-smi")
+    let output = hidden_command("nvidia-smi")
         .args([
             "--query-gpu=utilization.gpu,memory.used,memory.total",
             "--format=csv,noheader,nounits",
@@ -1581,7 +1611,7 @@ fn diagnostics_context(
         app_version: env!("CARGO_PKG_VERSION"),
         requested_provider: provider.as_str().to_string(),
         resolved_model_path,
-        confidence_threshold: confidence_threshold.unwrap_or(0.25),
+        confidence_threshold: confidence_threshold.unwrap_or(DEFAULT_LIVE_CONFIDENCE_THRESHOLD),
         selected_screen_id,
         screens,
         overlay_enabled: overlay_screen_id.is_some(),
@@ -1895,7 +1925,7 @@ fn apply_update(
             escape_powershell_path(&script),
             escape_powershell_path(&install_root)
         );
-        Command::new("powershell.exe")
+        hidden_command("powershell.exe")
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
@@ -1939,7 +1969,7 @@ fn run_update_command(
 
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("powershell.exe");
+        let mut command = hidden_command("powershell.exe");
         command.args([
             "-NoProfile",
             "-ExecutionPolicy",
