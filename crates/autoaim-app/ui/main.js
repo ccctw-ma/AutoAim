@@ -222,6 +222,7 @@ const OPEN_OVERLAY_TIMEOUT_MS = 3500;
 const LIVE_PREVIEW_FRAME_INTERVAL = 3;
 const LIVE_WATCHDOG_INTERVAL_MS = 1000;
 const LIVE_STUCK_POLL_MS = 1500;
+const LIVE_TRANSIENT_ERROR_DELAY_MS = 1000;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
 const UPDATE_CHECK_TIMEOUT_MS = 8000;
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
@@ -257,6 +258,7 @@ const state = {
   lastCursor: [0, 0],
   lastFrame: null,
   lastSnapshotSummary: null,
+  liveDatasetPath: null,
   previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") !== "false",
   screens: [],
   selectedScreenId: null,
@@ -839,6 +841,17 @@ function startLiveWatchdog(sessionId) {
   }, LIVE_WATCHDOG_INTERVAL_MS);
 }
 
+function isTransientLiveError(error) {
+  const message = (error?.message || String(error)).toLowerCase();
+  return (
+    message.includes("screen capture timed out") ||
+    message.includes("failed to run movenet") ||
+    message.includes("dmlcommandrecorder") ||
+    message.includes("live_monitor_snapshot timed out") ||
+    message.includes("capture thread")
+  );
+}
+
 function scheduleLivePoll(sessionId, delayMs = LIVE_POLL_INTERVAL_MS) {
   clearLiveTimer();
   if (!state.liveRunning || sessionId !== state.liveSessionId) {
@@ -855,8 +868,19 @@ function scheduleLivePoll(sessionId, delayMs = LIVE_POLL_INTERVAL_MS) {
       await pollLiveSnapshot(sessionId);
       scheduleLivePoll(sessionId);
     } catch (error) {
-      setStatus(error?.message || String(error), "error");
-      stopLiveMonitor();
+        const message = error?.message || String(error);
+        writeFileLog("ui", "live poll transient error", {
+          sessionId,
+          sequence: state.livePollSequence,
+          message,
+        });
+        if (isTransientLiveError(error)) {
+          setStatus(message, "warning");
+          scheduleLivePoll(sessionId, LIVE_TRANSIENT_ERROR_DELAY_MS);
+        } else {
+          setStatus(message, "error");
+          stopLiveMonitor();
+        }
     }
   }, delayMs);
 }
@@ -871,10 +895,12 @@ function stopLiveMonitor() {
   state.detectedPeople = [];
   state.lastFrame = null;
   state.lastSnapshotSummary = null;
+  state.liveDatasetPath = null;
   renderPeople([]);
   els.liveState.textContent = t("liveStopped");
   setStatus(t("liveStoppedStatus"), "ready");
   invoke?.("close_overlay_window").catch?.(() => {});
+  invoke?.("stop_live_dataset_recording").catch?.(() => {});
 }
 
 function updateMetrics(summary) {
@@ -1106,6 +1132,13 @@ on(els.startLiveBtn, "click", async () => {
       confidence: els.confidenceInput.value,
     });
     const liveSessionId = state.liveSessionId;
+      try {
+        const dataset = await invoke("start_live_dataset_recording");
+        state.liveDatasetPath = dataset.path;
+        log("Live dataset recording started", dataset);
+      } catch (error) {
+        log(`Live dataset recording failed ${error?.message || String(error)}`);
+      }
     await openOverlayForSelectedScreen();
     state.liveRunning = true;
     els.liveState.textContent = t("liveRunning");

@@ -10,7 +10,7 @@ use autoaim_runtime::{
     mock_native_detections, JsonlEventWriter, LiveDetectionInput, ReviewPipeline,
 };
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Read,
@@ -63,6 +63,33 @@ struct GpuSmokeResult {
     poses: usize,
     keypoints: usize,
     model_status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveDatasetReplayRecord {
+    frame_file: String,
+    frame_size: [u32; 2],
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    capture_backend: String,
+    cursor: [f32; 2],
+    cursor_on_screen: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveDatasetReplayResult {
+    dataset_dir: String,
+    provider: String,
+    model_path: String,
+    frames: usize,
+    errors: usize,
+    total_ms: f64,
+    mean_ms: f64,
+    objects: usize,
+    poses: usize,
+    keypoints: usize,
+    zero_pose_frames: usize,
+    last_model_status: String,
 }
 
 #[derive(Debug, Parser)]
@@ -137,6 +164,26 @@ enum Command {
         #[arg(long)]
         fail_on_zero_pose: bool,
     },
+    /// Replay a recorded live dataset through the native detector.
+    ReplayLiveDataset {
+        /// Dataset directory containing records.jsonl and frames/.
+        dataset_dir: PathBuf,
+        /// Inference provider to exercise.
+        #[arg(long, default_value = "directml")]
+        provider: String,
+        /// Model path, defaults to models/movenet_lightning.onnx.
+        #[arg(long)]
+        model_path: Option<PathBuf>,
+        /// Confidence threshold for decoded poses.
+        #[arg(long, default_value_t = 0.25)]
+        confidence_threshold: f32,
+        /// Max frames to replay.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Fail if every replayed frame has zero poses.
+        #[arg(long)]
+        fail_on_zero_pose: bool,
+    },
     /// Check for or apply updates from the Windows binary installation.
     Update {
         /// Show detected upstream changes without updating files.
@@ -188,6 +235,21 @@ fn run() -> Result<()> {
             model_path,
             iterations,
             confidence_threshold,
+            fail_on_zero_pose,
+        ),
+        Command::ReplayLiveDataset {
+            dataset_dir,
+            provider,
+            model_path,
+            confidence_threshold,
+            limit,
+            fail_on_zero_pose,
+        } => replay_live_dataset(
+            dataset_dir,
+            provider,
+            model_path,
+            confidence_threshold,
+            limit,
             fail_on_zero_pose,
         ),
         Command::Update {
@@ -445,6 +507,123 @@ fn gpu_smoke(
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+fn replay_live_dataset(
+    dataset_dir: PathBuf,
+    provider: String,
+    model_path: Option<PathBuf>,
+    confidence_threshold: f32,
+    limit: Option<usize>,
+    fail_on_zero_pose: bool,
+) -> Result<()> {
+    let provider = NativeInferenceProvider::from_name(&provider)
+        .with_context(|| format!("unsupported inference provider: {provider}"))?;
+    let model_path = model_path.unwrap_or_else(|| PathBuf::from("models/movenet_lightning.onnx"));
+    if !model_path.is_file() {
+        anyhow::bail!("model file not found: {}", model_path.display());
+    }
+    let records_path = dataset_dir.join("records.jsonl");
+    let records_text = fs::read_to_string(&records_path)
+        .with_context(|| format!("failed to read {}", records_path.display()))?;
+    let config = NativeInferenceConfig::new(
+        provider,
+        Some(model_path.to_string_lossy().to_string()),
+        confidence_threshold,
+    );
+    let detector = NativePersonDetector::from_config(config)?;
+
+    let mut frames = 0usize;
+    let mut errors = 0usize;
+    let mut total_ms = 0.0_f64;
+    let mut objects = 0usize;
+    let mut poses = 0usize;
+    let mut keypoints = 0usize;
+    let mut zero_pose_frames = 0usize;
+    let mut last_model_status = String::new();
+
+    for line in records_text.lines().filter(|line| !line.trim().is_empty()) {
+        if limit.is_some_and(|limit| frames >= limit) {
+            break;
+        }
+        let record: LiveDatasetReplayRecord = serde_json::from_str(line)?;
+        let rgba_path = dataset_dir.join(&record.frame_file);
+        let rgba = fs::read(&rgba_path)
+            .with_context(|| format!("failed to read frame {}", rgba_path.display()))?;
+        let expected_len = record.frame_size[0] as usize * record.frame_size[1] as usize * 4;
+        if rgba.len() != expected_len {
+            anyhow::bail!(
+                "frame {} has {} bytes, expected {}",
+                rgba_path.display(),
+                rgba.len(),
+                expected_len
+            );
+        }
+        let frame = CapturedFrame {
+            screen_origin: record.screen_origin,
+            screen_size: record.screen_size,
+            frame_size: record.frame_size,
+            capture_backend: parse_capture_backend(&record.capture_backend),
+            rgba,
+            cursor: record.cursor,
+            cursor_on_screen: record.cursor_on_screen,
+            timestamp_millis: 0,
+        };
+        frames += 1;
+        let start = Instant::now();
+        match detector.detect(&frame) {
+            Ok(output) => {
+                total_ms += start.elapsed().as_secs_f64() * 1000.0;
+                if output.poses.is_empty() {
+                    zero_pose_frames += 1;
+                }
+                objects += output.objects.len();
+                poses += output.poses.len();
+                keypoints += output
+                    .poses
+                    .iter()
+                    .map(|pose| pose.keypoints.len())
+                    .sum::<usize>();
+                last_model_status = output.model_status;
+            }
+            Err(error) => {
+                total_ms += start.elapsed().as_secs_f64() * 1000.0;
+                errors += 1;
+                last_model_status = error.to_string();
+            }
+        }
+    }
+
+    if fail_on_zero_pose && frames > 0 && poses == 0 {
+        anyhow::bail!("replay produced zero poses across {frames} frame(s)");
+    }
+    let result = LiveDatasetReplayResult {
+        dataset_dir: dataset_dir.display().to_string(),
+        provider: provider.as_str().to_string(),
+        model_path: model_path.display().to_string(),
+        frames,
+        errors,
+        total_ms,
+        mean_ms: if frames == 0 {
+            0.0
+        } else {
+            total_ms / frames as f64
+        },
+        objects,
+        poses,
+        keypoints,
+        zero_pose_frames,
+        last_model_status,
+    };
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn parse_capture_backend(value: &str) -> CaptureBackend {
+    match value {
+        "desktop_duplication" => CaptureBackend::DesktopDuplication,
+        _ => CaptureBackend::Gdi,
+    }
 }
 
 fn synthetic_smoke_frame(screen_size: [u32; 2]) -> CapturedFrame {

@@ -44,6 +44,7 @@ const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
 const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
 const LIVE_CAPTURE_TIMEOUT_MS: u64 = 1000;
+const LIVE_DATASET_MAX_FRAMES: u64 = 120;
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
@@ -148,6 +149,36 @@ struct LiveMonitorSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct LiveDatasetInfo {
+    path: String,
+    max_frames: u64,
+}
+
+#[derive(Serialize)]
+struct LiveDatasetRecord<'a> {
+    schema_version: u32,
+    sequence: u64,
+    timestamp_millis: u128,
+    screen_id: &'a str,
+    frame_file: &'a str,
+    frame_format: &'static str,
+    frame_size: [u32; 2],
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    capture_backend: &'static str,
+    cursor: Point,
+    cursor_on_screen: bool,
+    provider: &'a str,
+    model_status: &'a str,
+    capture_status: &'a str,
+    capture_ms: u128,
+    detect_ms: u128,
+    tracking_ms: u128,
+    total_ms: u128,
+    people: &'a [LivePersonPosition],
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct OverlaySnapshot {
     screen_id: String,
     screen_origin: [i32; 2],
@@ -198,6 +229,19 @@ struct LiveDetectorState {
 #[derive(Default)]
 struct LiveCaptureState {
     capturer: Mutex<Option<ScreenCapturer>>,
+}
+
+#[derive(Default)]
+struct LiveDatasetState {
+    recorder: Mutex<Option<LiveDatasetRecorder>>,
+}
+
+struct LiveDatasetRecorder {
+    root: PathBuf,
+    frames_dir: PathBuf,
+    records_path: PathBuf,
+    frames_written: u64,
+    max_frames: u64,
 }
 
 struct OverlayState {
@@ -278,12 +322,14 @@ async fn live_monitor_snapshot(
         let tracking_state = app.state::<LiveTrackingState>();
         let detector_state = app.state::<LiveDetectorState>();
         let capture_state = app.state::<LiveCaptureState>();
+        let dataset_state = app.state::<LiveDatasetState>();
         let overlay_state = app.state::<OverlayState>();
         build_live_monitor_snapshot(
             &app,
             &tracking_state,
             &detector_state,
             &capture_state,
+            &dataset_state,
             &overlay_state,
             &screen,
             config,
@@ -299,6 +345,7 @@ fn build_live_monitor_snapshot(
     tracking_state: &LiveTrackingState,
     detector_state: &LiveDetectorState,
     capture_state: &LiveCaptureState,
+    dataset_state: &LiveDatasetState,
     overlay_state: &OverlayState,
     screen: &ScreenInfo,
     config: NativeInferenceConfig,
@@ -407,6 +454,19 @@ fn build_live_monitor_snapshot(
             )),
         );
     }
+    record_live_dataset_frame(
+        dataset_state,
+        sequence,
+        screen,
+        &frame,
+        &inference,
+        &capture_status,
+        capture_ms,
+        detect_ms,
+        tracking_ms,
+        total_ms,
+        &people,
+    );
 
     Ok(LiveMonitorSnapshot {
         screen_id: screen.id.clone(),
@@ -679,12 +739,170 @@ fn append_app_log(scope: &str, message: &str, payload: Option<&str>) {
     }
 }
 
+fn unix_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
 fn json_escape(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+#[tauri::command]
+fn start_live_dataset_recording(
+    dataset_state: tauri::State<LiveDatasetState>,
+) -> Result<LiveDatasetInfo, String> {
+    let timestamp = unix_timestamp_millis();
+    let root = log_file_path()
+        .parent()
+        .and_then(Path::parent)
+        .map(|path| path.join("datasets").join(format!("live-{timestamp}")))
+        .unwrap_or_else(|| PathBuf::from("datasets").join(format!("live-{timestamp}")));
+    let frames_dir = root.join("frames");
+    std::fs::create_dir_all(&frames_dir).map_err(|error| error.to_string())?;
+    let records_path = root.join("records.jsonl");
+    let manifest_path = root.join("manifest.json");
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "created_at_millis": timestamp,
+        "max_frames": LIVE_DATASET_MAX_FRAMES,
+        "frame_format": "rgba8",
+        "records": "records.jsonl",
+        "frames_dir": "frames"
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::File::create(&records_path).map_err(|error| error.to_string())?;
+
+    let mut recorder = dataset_state
+        .recorder
+        .lock()
+        .map_err(|_| "live dataset state lock poisoned".to_string())?;
+    *recorder = Some(LiveDatasetRecorder {
+        root: root.clone(),
+        frames_dir,
+        records_path,
+        frames_written: 0,
+        max_frames: LIVE_DATASET_MAX_FRAMES,
+    });
+    append_app_log(
+        "backend",
+        "live dataset recording started",
+        Some(&format!(r#"{{"path":"{}"}}"#, root.display())),
+    );
+    Ok(LiveDatasetInfo {
+        path: root.display().to_string(),
+        max_frames: LIVE_DATASET_MAX_FRAMES,
+    })
+}
+
+#[tauri::command]
+fn stop_live_dataset_recording(
+    dataset_state: tauri::State<LiveDatasetState>,
+) -> Result<(), String> {
+    let mut recorder = dataset_state
+        .recorder
+        .lock()
+        .map_err(|_| "live dataset state lock poisoned".to_string())?;
+    if let Some(recorder) = recorder.take() {
+        append_app_log(
+            "backend",
+            "live dataset recording stopped",
+            Some(&format!(
+                r#"{{"path":"{}","frames":{}}}"#,
+                recorder.root.display(),
+                recorder.frames_written
+            )),
+        );
+    }
+    Ok(())
+}
+
+fn record_live_dataset_frame(
+    dataset_state: &LiveDatasetState,
+    sequence: u64,
+    screen: &ScreenInfo,
+    frame: &CapturedFrame,
+    inference: &autoaim_infer::InferenceOutput,
+    capture_status: &str,
+    capture_ms: u128,
+    detect_ms: u128,
+    tracking_ms: u128,
+    total_ms: u128,
+    people: &[LivePersonPosition],
+) {
+    let mut recorder = match dataset_state.recorder.lock() {
+        Ok(recorder) => recorder,
+        Err(_) => return,
+    };
+    let Some(recorder) = recorder.as_mut() else {
+        return;
+    };
+    if recorder.frames_written >= recorder.max_frames {
+        return;
+    }
+
+    let frame_name = format!("frame-{sequence:06}.rgba");
+    let frame_path = recorder.frames_dir.join(&frame_name);
+    if std::fs::write(&frame_path, &frame.rgba).is_err() {
+        append_app_log("backend", "live dataset frame write failed", None);
+        return;
+    }
+    let frame_file = format!("frames/{frame_name}");
+    let record = LiveDatasetRecord {
+        schema_version: 1,
+        sequence,
+        timestamp_millis: frame.timestamp_millis,
+        screen_id: &screen.id,
+        frame_file: &frame_file,
+        frame_format: "rgba8",
+        frame_size: frame.frame_size,
+        screen_origin: frame.screen_origin,
+        screen_size: frame.screen_size,
+        capture_backend: frame.capture_backend.as_str(),
+        cursor: frame.cursor,
+        cursor_on_screen: frame.cursor_on_screen,
+        provider: inference.provider.as_str(),
+        model_status: &inference.model_status,
+        capture_status,
+        capture_ms,
+        detect_ms,
+        tracking_ms,
+        total_ms,
+        people,
+    };
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&recorder.records_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+        recorder.frames_written += 1;
+        if recorder.frames_written == recorder.max_frames {
+            append_app_log(
+                "backend",
+                "live dataset recording reached frame limit",
+                Some(&format!(
+                    r#"{{"path":"{}","frames":{}}}"#,
+                    recorder.root.display(),
+                    recorder.frames_written
+                )),
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -1316,6 +1534,7 @@ fn main() {
         .manage(LiveTrackingState::default())
         .manage(LiveDetectorState::default())
         .manage(LiveCaptureState::default())
+        .manage(LiveDatasetState::default())
         .manage(OverlayState::default())
         .setup(|_app| {
             let log_path = log_file_path();
@@ -1332,6 +1551,8 @@ fn main() {
             inference_runtime_config,
             list_screens,
             live_monitor_snapshot,
+            start_live_dataset_recording,
+            stop_live_dataset_recording,
             diagnostics_context,
             open_overlay_window,
             close_overlay_window,
