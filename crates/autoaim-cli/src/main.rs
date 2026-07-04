@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use autoaim_capture::{capture_screen_frame, CaptureBackend, CapturedFrame};
+use autoaim_capture::{capture_screen_frame, CaptureBackend, CapturedFrame, ScreenCapturer};
 use autoaim_core::{read_jsonl_path, suggest_frames, summarize, validate_records, TargetScorer};
 use autoaim_infer::{
     InferenceConfig as NativeInferenceConfig, NativeInferenceProvider, NativePersonDetector,
@@ -16,7 +16,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::ExitCode,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Serialize)]
@@ -65,6 +65,23 @@ struct GpuSmokeResult {
     model_status: String,
 }
 
+#[derive(Debug, Serialize)]
+struct CaptureBenchResult {
+    iterations: usize,
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+    backend: String,
+    total_ms: f64,
+    mean_ms: f64,
+    min_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    max_ms: f64,
+    slow_frames_16_ms: usize,
+    slow_frames_33_ms: usize,
+    slow_frames_50_ms: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct LiveDatasetReplayRecord {
     frame_file: String,
@@ -85,6 +102,13 @@ struct LiveDatasetReplayResult {
     errors: usize,
     total_ms: f64,
     mean_ms: f64,
+    min_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    max_ms: f64,
+    slow_frames_33_ms: usize,
+    slow_frames_50_ms: usize,
+    slow_frames_100_ms: usize,
     objects: usize,
     object_frames: usize,
     poses: usize,
@@ -165,6 +189,18 @@ enum Command {
         #[arg(long)]
         fail_on_zero_pose: bool,
     },
+    /// Benchmark the reusable live capture path.
+    BenchCapture {
+        /// Number of frames to capture.
+        #[arg(long, default_value_t = 120)]
+        iterations: usize,
+        /// Maximum captured frame width.
+        #[arg(long, default_value_t = 1920)]
+        max_width: u32,
+        /// Maximum captured frame height.
+        #[arg(long, default_value_t = 1080)]
+        max_height: u32,
+    },
     /// Replay a recorded live dataset through the native detector.
     ReplayLiveDataset {
         /// Dataset directory containing records.jsonl and frames/.
@@ -238,6 +274,11 @@ fn run() -> Result<()> {
             confidence_threshold,
             fail_on_zero_pose,
         ),
+        Command::BenchCapture {
+            iterations,
+            max_width,
+            max_height,
+        } => bench_capture(iterations, [max_width, max_height]),
         Command::ReplayLiveDataset {
             dataset_dir,
             provider,
@@ -259,6 +300,43 @@ fn run() -> Result<()> {
             install_dir,
         } => update(check, show_diff, install_dir),
     }
+}
+
+fn bench_capture(iterations: usize, max_frame_size: [u32; 2]) -> Result<()> {
+    anyhow::ensure!(iterations > 0, "iterations must be greater than zero");
+    let screen_size = primary_screen_size()?;
+    let mut capturer = ScreenCapturer::new([0, 0], screen_size, max_frame_size)?;
+    let mut samples = Vec::with_capacity(iterations);
+    let mut backend = CaptureBackend::DesktopDuplication;
+    let mut frame_size = [0_u32, 0_u32];
+
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let frame = capturer.capture(Duration::from_millis(1000))?;
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        backend = frame.capture_backend;
+        frame_size = frame.frame_size;
+    }
+
+    samples.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let total_ms = samples.iter().sum::<f64>();
+    let result = CaptureBenchResult {
+        iterations,
+        screen_size,
+        frame_size,
+        backend: backend.as_str().to_string(),
+        total_ms,
+        mean_ms: total_ms / iterations as f64,
+        min_ms: samples.first().copied().unwrap_or_default(),
+        p50_ms: percentile(&samples, 0.50),
+        p95_ms: percentile(&samples, 0.95),
+        max_ms: samples.last().copied().unwrap_or_default(),
+        slow_frames_16_ms: samples.iter().filter(|sample| **sample >= 16.0).count(),
+        slow_frames_33_ms: samples.iter().filter(|sample| **sample >= 33.0).count(),
+        slow_frames_50_ms: samples.iter().filter(|sample| **sample >= 50.0).count(),
+    };
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
 }
 
 fn validate(input: PathBuf, json: bool) -> Result<()> {
@@ -552,6 +630,7 @@ fn replay_live_dataset(
     let mut keypoints = 0usize;
     let mut zero_pose_frames = 0usize;
     let mut last_model_status = String::new();
+    let mut samples = Vec::new();
 
     for line in records_text.lines().filter(|line| !line.trim().is_empty()) {
         if limit.is_some_and(|limit| frames >= limit) {
@@ -584,7 +663,9 @@ fn replay_live_dataset(
         let start = Instant::now();
         match detector.detect(&frame) {
             Ok(output) => {
-                total_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                total_ms += elapsed_ms;
+                samples.push(elapsed_ms);
                 if output.poses.is_empty() {
                     zero_pose_frames += 1;
                 }
@@ -601,7 +682,9 @@ fn replay_live_dataset(
                 last_model_status = output.model_status;
             }
             Err(error) => {
-                total_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                total_ms += elapsed_ms;
+                samples.push(elapsed_ms);
                 errors += 1;
                 last_model_status = error.to_string();
             }
@@ -611,6 +694,7 @@ fn replay_live_dataset(
     if fail_on_zero_pose && frames > 0 && poses == 0 && objects == 0 {
         anyhow::bail!("replay produced zero poses and zero objects across {frames} frame(s)");
     }
+    samples.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let result = LiveDatasetReplayResult {
         dataset_dir: dataset_dir.display().to_string(),
         provider: provider.as_str().to_string(),
@@ -623,6 +707,13 @@ fn replay_live_dataset(
         } else {
             total_ms / frames as f64
         },
+        min_ms: samples.first().copied().unwrap_or_default(),
+        p50_ms: percentile(&samples, 0.50),
+        p95_ms: percentile(&samples, 0.95),
+        max_ms: samples.last().copied().unwrap_or_default(),
+        slow_frames_33_ms: samples.iter().filter(|sample| **sample >= 33.0).count(),
+        slow_frames_50_ms: samples.iter().filter(|sample| **sample >= 50.0).count(),
+        slow_frames_100_ms: samples.iter().filter(|sample| **sample >= 100.0).count(),
         objects,
         object_frames,
         poses,

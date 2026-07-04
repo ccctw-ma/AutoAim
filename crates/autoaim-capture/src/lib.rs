@@ -103,7 +103,7 @@ pub fn capture_screen_frame(
     max_frame_size: [u32; 2],
 ) -> Result<CapturedFrame, CaptureError> {
     let frame_size = scaled_frame_size(screen_size, max_frame_size)?;
-    let cursor = cursor_position()?;
+    let cursor = cursor_position().unwrap_or_else(|_| screen_center(screen_origin, screen_size));
     let cursor_on_screen = point_in_screen(cursor, screen_origin, screen_size);
     let (rgba, capture_backend) =
         capture_screen_region_rgba(screen_origin, screen_size, frame_size)?;
@@ -131,6 +131,13 @@ pub fn point_in_screen(point: Point, origin: [i32; 2], size: [u32; 2]) -> bool {
     let bottom = top + size[1] as f32;
 
     point[0] >= left && point[0] < right && point[1] >= top && point[1] < bottom
+}
+
+fn screen_center(origin: [i32; 2], size: [u32; 2]) -> Point {
+    [
+        origin[0] as f32 + size[0] as f32 / 2.0,
+        origin[1] as f32 + size[1] as f32 / 2.0,
+    ]
 }
 
 pub fn scaled_frame_size(
@@ -216,7 +223,8 @@ impl ScreenCapturer {
     /// abandoned (it is dropped without being joined) so the next attempt starts
     /// a fresh session.
     pub fn capture(&mut self, timeout: Duration) -> Result<CapturedFrame, CaptureError> {
-        let cursor = cursor_position()?;
+        let cursor = cursor_position()
+            .unwrap_or_else(|_| screen_center(self.screen_origin, self.screen_size));
         let cursor_on_screen = point_in_screen(cursor, self.screen_origin, self.screen_size);
 
         self.request_tx
@@ -257,7 +265,18 @@ impl ScreenCapturer {
 }
 
 fn capture_worker_loop(request_rx: Receiver<CaptureRequest>, response_tx: Sender<CaptureResponse>) {
+    #[cfg(target_os = "windows")]
+    let mut desktop_duplication = DesktopDuplicationCaptureState::default();
+
     while let Ok(request) = request_rx.recv() {
+        #[cfg(target_os = "windows")]
+        let result = capture_screen_region_rgba_cached(
+            request.screen_origin,
+            request.screen_size,
+            request.frame_size,
+            &mut desktop_duplication,
+        );
+        #[cfg(not(target_os = "windows"))]
         let result = capture_screen_region_rgba(
             request.screen_origin,
             request.screen_size,
@@ -305,14 +324,120 @@ fn capture_screen_region_rgba(
 }
 
 #[cfg(target_os = "windows")]
-fn capture_screen_region_rgba_desktop_duplication(
+fn capture_screen_region_rgba_cached(
+    screen_origin: [i32; 2],
     screen_size: [u32; 2],
     frame_size: [u32; 2],
-) -> Result<Vec<u8>, CaptureError> {
-    use scrap::{Capturer, Display};
-    use std::{io::ErrorKind, thread, time::Duration};
+    desktop_duplication: &mut DesktopDuplicationCaptureState,
+) -> Result<(Vec<u8>, CaptureBackend), CaptureError> {
+    if let Ok(rgba) = desktop_duplication.capture(screen_size, frame_size) {
+        return Ok((rgba, CaptureBackend::DesktopDuplication));
+    }
 
-    let matching = Display::all()
+    capture_screen_region_rgba_gdi(screen_origin, screen_size, frame_size)
+        .map(|rgba| (rgba, CaptureBackend::Gdi))
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct DesktopDuplicationCaptureState {
+    screen_size: Option<[u32; 2]>,
+    frame_size: Option<[u32; 2]>,
+    src_width: usize,
+    src_height: usize,
+    capturer: Option<scrap::Capturer>,
+    last_rgba: Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "windows")]
+impl DesktopDuplicationCaptureState {
+    fn capture(
+        &mut self,
+        screen_size: [u32; 2],
+        frame_size: [u32; 2],
+    ) -> Result<Vec<u8>, CaptureError> {
+        use std::{io::ErrorKind, thread, time::Duration};
+
+        self.ensure_capturer(screen_size)?;
+        if self.frame_size != Some(frame_size) {
+            self.frame_size = Some(frame_size);
+            self.last_rgba = None;
+        }
+
+        let wait_attempts = if self.last_rgba.is_some() { 1 } else { 8 };
+        for _ in 0..wait_attempts {
+            let capturer = self
+                .capturer
+                .as_mut()
+                .ok_or(CaptureError::BackendUnavailable(
+                    "desktop duplication capturer is not initialized",
+                ))?;
+            match capturer.frame() {
+                Ok(frame) => {
+                    let pitch = frame.len() / self.src_height.max(1);
+                    let rgba = scale_bgra_to_rgba(
+                        &frame,
+                        self.src_width,
+                        self.src_height,
+                        pitch,
+                        frame_size[0] as usize,
+                        frame_size[1] as usize,
+                    );
+                    self.last_rgba = Some(rgba.clone());
+                    return Ok(rgba);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if let Some(rgba) = self.last_rgba.as_ref() {
+                        return Ok(rgba.clone());
+                    }
+                    thread::sleep(Duration::from_millis(4));
+                }
+                Err(_) => {
+                    self.reset();
+                    return Err(CaptureError::BackendUnavailable(
+                        "desktop duplication failed to capture frame",
+                    ));
+                }
+            }
+        }
+
+        self.last_rgba
+            .clone()
+            .ok_or(CaptureError::BackendUnavailable(
+                "desktop duplication timed out while waiting for a frame",
+            ))
+    }
+
+    fn ensure_capturer(&mut self, screen_size: [u32; 2]) -> Result<(), CaptureError> {
+        if self.capturer.is_some() && self.screen_size == Some(screen_size) {
+            return Ok(());
+        }
+
+        self.reset();
+        let display = desktop_duplication_display(screen_size)?;
+        self.src_width = display.width();
+        self.src_height = display.height();
+        self.capturer =
+            Some(scrap::Capturer::new(display).map_err(|_| {
+                CaptureError::BackendUnavailable("desktop duplication init failed")
+            })?);
+        self.screen_size = Some(screen_size);
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.screen_size = None;
+        self.frame_size = None;
+        self.src_width = 0;
+        self.src_height = 0;
+        self.capturer = None;
+        self.last_rgba = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_duplication_display(screen_size: [u32; 2]) -> Result<scrap::Display, CaptureError> {
+    let matching = scrap::Display::all()
         .map_err(|_| {
             CaptureError::BackendUnavailable("desktop duplication display enumeration failed")
         })?
@@ -322,52 +447,24 @@ fn capture_screen_region_rgba_desktop_duplication(
         })
         .collect::<Vec<_>>();
 
-    let display = match matching.len() {
-        1 => matching.into_iter().next().expect("display should exist"),
-        0 => {
-            return Err(CaptureError::BackendUnavailable(
-                "desktop duplication display not found",
-            ));
-        }
-        _ => {
-            return Err(CaptureError::BackendUnavailable(
-                "desktop duplication display match is ambiguous",
-            ));
-        }
-    };
-
-    let src_width = display.width() as usize;
-    let src_height = display.height() as usize;
-    let mut capturer = Capturer::new(display)
-        .map_err(|_| CaptureError::BackendUnavailable("desktop duplication init failed"))?;
-
-    for _ in 0..8 {
-        match capturer.frame() {
-            Ok(frame) => {
-                let pitch = frame.len() / src_height.max(1);
-                return Ok(scale_bgra_to_rgba(
-                    &frame,
-                    src_width,
-                    src_height,
-                    pitch,
-                    frame_size[0] as usize,
-                    frame_size[1] as usize,
-                ));
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(8));
-            }
-            Err(_) => {
-                return Err(CaptureError::BackendUnavailable(
-                    "desktop duplication failed to capture frame",
-                ));
-            }
-        }
+    match matching.len() {
+        1 => Ok(matching.into_iter().next().expect("display should exist")),
+        0 => Err(CaptureError::BackendUnavailable(
+            "desktop duplication display not found",
+        )),
+        _ => Err(CaptureError::BackendUnavailable(
+            "desktop duplication display match is ambiguous",
+        )),
     }
+}
 
-    Err(CaptureError::BackendUnavailable(
-        "desktop duplication timed out while waiting for a frame",
-    ))
+#[cfg(target_os = "windows")]
+fn capture_screen_region_rgba_desktop_duplication(
+    screen_size: [u32; 2],
+    frame_size: [u32; 2],
+) -> Result<Vec<u8>, CaptureError> {
+    let mut state = DesktopDuplicationCaptureState::default();
+    state.capture(screen_size, frame_size)
 }
 
 #[cfg(target_os = "windows")]
@@ -380,19 +477,24 @@ fn scale_bgra_to_rgba(
     dst_height: usize,
 ) -> Vec<u8> {
     let mut rgba = vec![0_u8; dst_width * dst_height * 4];
-    let scale_x = src_width as f32 / dst_width.max(1) as f32;
-    let scale_y = src_height as f32 / dst_height.max(1) as f32;
+    let src_x_offsets = (0..dst_width)
+        .map(|dst_x| {
+            (((dst_x * 2 + 1) * src_width) / (dst_width.max(1) * 2))
+                .min(src_width.saturating_sub(1))
+                * 4
+        })
+        .collect::<Vec<_>>();
+    let src_y_rows = (0..dst_height)
+        .map(|dst_y| {
+            (((dst_y * 2 + 1) * src_height) / (dst_height.max(1) * 2))
+                .min(src_height.saturating_sub(1))
+                * src_pitch
+        })
+        .collect::<Vec<_>>();
 
-    for dst_y in 0..dst_height {
-        let src_y = ((dst_y as f32 + 0.5) * scale_y)
-            .floor()
-            .clamp(0.0, src_height.saturating_sub(1) as f32) as usize;
-        let src_row = src_y * src_pitch;
-        for dst_x in 0..dst_width {
-            let src_x = ((dst_x as f32 + 0.5) * scale_x)
-                .floor()
-                .clamp(0.0, src_width.saturating_sub(1) as f32) as usize;
-            let src_index = src_row + src_x * 4;
+    for (dst_y, src_row) in src_y_rows.iter().copied().enumerate() {
+        for (dst_x, src_x) in src_x_offsets.iter().copied().enumerate() {
+            let src_index = src_row + src_x;
             let dst_index = (dst_y * dst_width + dst_x) * 4;
             rgba[dst_index] = bgra[src_index + 2];
             rgba[dst_index + 1] = bgra[src_index + 1];

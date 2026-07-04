@@ -57,6 +57,7 @@ const i18n = {
     provider: "Provider",
     threshold: "Confidence",
     activationKey: "Activation key",
+    recordDataset: "Record dataset",
     modelPath: "Model path",
     modelPathPlaceholder: "Bundled model",
     showRuntime: "Show config",
@@ -169,6 +170,7 @@ const i18n = {
     provider: "推理后端",
     threshold: "置信度",
     activationKey: "激活键",
+    recordDataset: "录制数据集",
     modelPath: "模型路径",
     modelPathPlaceholder: "使用内置模型",
     showRuntime: "显示配置",
@@ -275,6 +277,7 @@ const state = {
   liveDatasetPath: null,
   compactMode: localStorage.getItem("autoaim.compactMode") === "true",
   activationKey: localStorage.getItem("autoaim.activationKey") || "alt",
+  recordDataset: localStorage.getItem("autoaim.recordDataset") === "true",
   previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") !== "false",
   screens: [],
   selectedScreenId: null,
@@ -299,6 +302,7 @@ const els = {
   hideOverlayBtn: $("hideOverlayBtn"),
   compactModeBtn: $("compactModeBtn"),
   previewFrameToggle: $("previewFrameToggle"),
+  recordDatasetToggle: $("recordDatasetToggle"),
   monitorCanvas: $("monitorCanvas"),
   liveState: $("liveState"),
   cursorReadout: $("cursorReadout"),
@@ -353,6 +357,9 @@ function applyLanguage(language) {
   }
   if (els.activationKeySelect) {
     els.activationKeySelect.value = state.activationKey;
+  }
+  if (els.recordDatasetToggle) {
+    els.recordDatasetToggle.checked = state.recordDataset;
   }
 
   document.querySelectorAll("[data-i18n]").forEach((node) => {
@@ -1228,6 +1235,12 @@ on(els.activationKeySelect, "change", (event) => {
   log("Activation key changed", { activationKey: state.activationKey });
 });
 
+on(els.recordDatasetToggle, "change", (event) => {
+  state.recordDataset = Boolean(event.target.checked);
+  localStorage.setItem("autoaim.recordDataset", state.recordDataset ? "true" : "false");
+  log("Dataset recording toggled", { enabled: state.recordDataset });
+});
+
 on(els.startLiveBtn, "click", async () => {
   await runAction(t("liveStarting"), async () => {
     if (state.livePolling) {
@@ -1239,17 +1252,16 @@ on(els.startLiveBtn, "click", async () => {
     state.liveRunning = false;
     clearLiveTimer();
     state.liveSessionId += 1;
-    if (!state.previewFrameEnabled) {
-      setPreviewFrameEnabled(true);
-    }
     log("Live monitor start requested", {
       previewFrameEnabled: state.previewFrameEnabled,
+      recordDataset: state.recordDataset,
       screenId: els.screenSelect.value || state.selectedScreenId,
       provider: els.providerSelect.value,
       modelPath: els.modelPath.value.trim(),
       confidence: els.confidenceInput.value,
     });
     const liveSessionId = state.liveSessionId;
+    if (state.recordDataset) {
       try {
         const dataset = await invoke("start_live_dataset_recording");
         state.liveDatasetPath = dataset.path;
@@ -1257,6 +1269,9 @@ on(els.startLiveBtn, "click", async () => {
       } catch (error) {
         log(`Live dataset recording failed ${error?.message || String(error)}`);
       }
+    } else {
+      state.liveDatasetPath = null;
+    }
     await openOverlayForSelectedScreen();
     state.liveRunning = true;
     els.liveState.textContent = t("liveRunning");
