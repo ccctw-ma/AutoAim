@@ -4,7 +4,8 @@
 )]
 
 use autoaim_capture::{
-    cursor_position, scaled_frame_size, CapturedFrame, CapturedFramePreview, ScreenCapturer,
+    cursor_position, point_in_screen, scaled_frame_size, CapturedFrame, CapturedFramePreview,
+    ScreenCapturer,
 };
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
@@ -56,11 +57,14 @@ const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
 static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "windows")]
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
+#[cfg(target_os = "windows")]
+const VK_MENU: i32 = 0x12;
 
 #[cfg(target_os = "windows")]
 #[link(name = "user32")]
 unsafe extern "system" {
     fn SetWindowDisplayAffinity(hwnd: isize, affinity: u32) -> i32;
+    fn GetAsyncKeyState(virtual_key_code: i32) -> i16;
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +151,7 @@ struct LiveMonitorSnapshot {
     cursor: Point,
     cursor_on_screen: bool,
     people: Vec<LivePersonPosition>,
+    activation_pressed: bool,
     latency: LiveLatency,
     telemetry: SystemTelemetry,
     model_status: String,
@@ -155,7 +160,7 @@ struct LiveMonitorSnapshot {
     review_only: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 struct LiveLatency {
     capture_ms: u128,
     detect_ms: u128,
@@ -365,6 +370,40 @@ fn list_screens(window: tauri::Window) -> Result<Vec<ScreenInfo>, String> {
 }
 
 #[tauri::command]
+fn set_compact_window(window: tauri::Window, compact: bool) -> Result<(), String> {
+    if compact {
+        let compact_size = tauri::PhysicalSize::new(460_u32, 320_u32);
+        window
+            .set_always_on_top(true)
+            .map_err(|error| format!("failed to set compact window topmost: {error}"))?;
+        window
+            .set_resizable(false)
+            .map_err(|error| format!("failed to set compact window resizable: {error}"))?;
+        window
+            .set_size(compact_size)
+            .map_err(|error| format!("failed to set compact window size: {error}"))?;
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let position = monitor.position();
+            let size = monitor.size();
+            let x = position.x + size.width.saturating_sub(compact_size.width + 24) as i32;
+            let y = position.y + 24;
+            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    } else {
+        window
+            .set_always_on_top(false)
+            .map_err(|error| format!("failed to clear compact window topmost: {error}"))?;
+        window
+            .set_resizable(true)
+            .map_err(|error| format!("failed to restore window resizable: {error}"))?;
+        window
+            .set_size(tauri::PhysicalSize::new(1480_u32, 900_u32))
+            .map_err(|error| format!("failed to restore window size: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn live_monitor_snapshot(
     app: tauri::AppHandle,
     window: tauri::Window,
@@ -429,6 +468,10 @@ fn build_live_monitor_snapshot(
     let sequence = LIVE_SNAPSHOT_SEQUENCE
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
+    if !live_activation_pressed() {
+        return build_live_idle_snapshot(app, overlay_state, telemetry_state, screen, sequence);
+    }
+
     let total_started = Instant::now();
     let capture_started = Instant::now();
     let frame = match capture_with_cached_capturer(capture_state, screen) {
@@ -556,6 +599,7 @@ fn build_live_monitor_snapshot(
         cursor: frame.cursor,
         cursor_on_screen: frame.cursor_on_screen,
         people,
+        activation_pressed: true,
         latency,
         telemetry,
         model_status: inference.model_status,
@@ -563,6 +607,69 @@ fn build_live_monitor_snapshot(
         provider: inference.provider.as_str().to_string(),
         review_only: true,
     })
+}
+
+fn build_live_idle_snapshot(
+    app: &tauri::AppHandle,
+    overlay_state: &OverlayState,
+    telemetry_state: &SystemTelemetryState,
+    screen: &ScreenInfo,
+    sequence: u64,
+) -> Result<LiveMonitorSnapshot, String> {
+    let cursor = cursor_position().unwrap_or([
+        screen.origin[0] as f32 + screen.size[0] as f32 / 2.0,
+        screen.origin[1] as f32 + screen.size[1] as f32 / 2.0,
+    ]);
+    let cursor_on_screen = point_in_screen(cursor, screen.origin, screen.size);
+    let people = Vec::new();
+    emit_overlay_snapshot(
+        app,
+        overlay_state,
+        OverlaySnapshot {
+            screen_id: screen.id.clone(),
+            screen_origin: screen.origin,
+            screen_size: screen.size,
+            cursor,
+            cursor_on_screen,
+            people: people.clone(),
+        },
+    );
+    let telemetry = sample_system_telemetry(telemetry_state);
+    if sequence <= 5 || sequence % LIVE_SNAPSHOT_LOG_EVERY == 0 {
+        append_app_log(
+            "backend",
+            "live snapshot idle",
+            Some(&format!(
+                r#"{{"sequence":{sequence},"screen_id":"{}","reason":"hold_alt"}}"#,
+                screen.id
+            )),
+        );
+    }
+
+    Ok(LiveMonitorSnapshot {
+        screen_id: screen.id.clone(),
+        frame: None,
+        cursor,
+        cursor_on_screen,
+        people,
+        activation_pressed: false,
+        latency: LiveLatency::default(),
+        telemetry,
+        model_status: "Hold Alt to scan".to_string(),
+        capture_status: "idle: hold Alt to capture and infer".to_string(),
+        provider: "idle".to_string(),
+        review_only: true,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn live_activation_pressed() -> bool {
+    unsafe { GetAsyncKeyState(VK_MENU) < 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn live_activation_pressed() -> bool {
+    true
 }
 
 fn should_log_live_snapshot(sequence: u64, total_ms: u128) -> bool {
@@ -1849,6 +1956,7 @@ fn main() {
             frontend_log,
             inference_runtime_config,
             list_screens,
+            set_compact_window,
             live_monitor_snapshot,
             start_live_dataset_recording,
             stop_live_dataset_recording,

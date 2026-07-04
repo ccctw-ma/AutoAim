@@ -963,6 +963,45 @@ body.compact-mode .workspace {
   display: block;
 }
 
+body.compact-mode {
+  min-height: 100vh;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+body.compact-mode .app-frame {
+  width: 100vw;
+  min-height: 100vh;
+  margin: 0;
+  border: 1px solid var(--line);
+}
+
+body.compact-mode .app-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px;
+}
+
+body.compact-mode .title-block,
+body.compact-mode #updateStatusBtn,
+body.compact-mode .select-label,
+body.compact-mode #languageSelect,
+body.compact-mode .panel-heading,
+body.compact-mode .control-strip {
+  display: none;
+}
+
+body.compact-mode .title-actions {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+}
+
+body.compact-mode .monitor-panel {
+  padding: 6px;
+}
+
 body.compact-mode .side-column,
 body.compact-mode .monitor-canvas-wrap,
 body.compact-mode .live-readouts {
@@ -981,6 +1020,16 @@ body.compact-mode .checkbox-toggle {
 
 body.compact-mode .compact-dashboard {
   display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 0;
+}
+
+body.compact-mode .compact-dashboard article {
+  border-bottom: 1px solid var(--line);
+}
+
+body.compact-mode .compact-dashboard article:nth-child(2n) {
+  border-right: 0;
 }
 
 .runtime-panel {

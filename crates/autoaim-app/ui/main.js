@@ -228,13 +228,13 @@ const i18n = {
   },
 };
 
-const LIVE_POLL_INTERVAL_MS = 100;
-const LIVE_SNAPSHOT_TIMEOUT_MS = 3500;
+const LIVE_POLL_INTERVAL_MS = 16;
+const LIVE_SNAPSHOT_TIMEOUT_MS = 1200;
 const OPEN_OVERLAY_TIMEOUT_MS = 3500;
 const LIVE_PREVIEW_FRAME_INTERVAL = 3;
 const LIVE_WATCHDOG_INTERVAL_MS = 1000;
-const LIVE_STUCK_POLL_MS = 1500;
-const LIVE_TRANSIENT_ERROR_DELAY_MS = 1000;
+const LIVE_STUCK_POLL_MS = 600;
+const LIVE_TRANSIENT_ERROR_DELAY_MS = 64;
 const AUTO_UPDATE_CHECK_DELAY_MS = 1200;
 const UPDATE_CHECK_TIMEOUT_MS = 8000;
 const KEYPOINT_SCORE_THRESHOLD = 0.2;
@@ -432,10 +432,23 @@ function renderCompactMode() {
   updatePreviewFrameVisibility();
 }
 
+function syncCompactWindow() {
+  if (!invoke) {
+    return;
+  }
+  invoke("set_compact_window", { compact: state.compactMode }).catch((error) => {
+    writeFileLog("ui", "set compact window failed", {
+      compact: state.compactMode,
+      message: error?.message || String(error),
+    });
+  });
+}
+
 function setCompactMode(enabled) {
   state.compactMode = enabled;
   localStorage.setItem("autoaim.compactMode", String(enabled));
   renderCompactMode();
+  syncCompactWindow();
 }
 
 async function copyDiagnostics() {
@@ -860,6 +873,7 @@ async function pollLiveSnapshot(sessionId = state.liveSessionId) {
       provider: snapshot.provider,
       model_status: snapshot.model_status,
       capture_status: snapshot.capture_status,
+      activation_pressed: snapshot.activation_pressed,
       latency: snapshot.latency,
       telemetry: snapshot.telemetry,
       frame_size: renderFrame?.frame_size,
@@ -1402,6 +1416,7 @@ if (!invoke) {
   invoke("app_info")
     .then((info) => log("AutoAim Review", info))
     .catch((error) => log(error?.message || String(error)));
+  syncCompactWindow();
   setTimeout(() => {
     checkForUpdates({ manual: false });
   }, AUTO_UPDATE_CHECK_DELAY_MS);
