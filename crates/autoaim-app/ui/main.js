@@ -59,6 +59,7 @@ const i18n = {
     activationKey: "Activation key",
     recordDataset: "Record dataset",
     predictionOverlay: "Prediction overlay",
+    autoMouse: "Auto move mouse",
     modelPath: "Model path",
     modelPathPlaceholder: "Bundled model",
     showRuntime: "Show config",
@@ -173,6 +174,7 @@ const i18n = {
     activationKey: "激活键",
     recordDataset: "录制数据集",
     predictionOverlay: "预测显示",
+    autoMouse: "自动移鼠标",
     modelPath: "模型路径",
     modelPathPlaceholder: "使用内置模型",
     showRuntime: "显示配置",
@@ -282,6 +284,7 @@ const state = {
   activationKey: localStorage.getItem("autoaim.activationKey") || "alt",
   recordDataset: localStorage.getItem("autoaim.recordDataset") === "true",
   predictionEnabled: localStorage.getItem("autoaim.predictionEnabled") === "true",
+  autoMouseEnabled: localStorage.getItem("autoaim.autoMouseEnabled") === "true",
   previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") === "true",
   screens: [],
   selectedScreenId: null,
@@ -338,6 +341,7 @@ const els = {
   confidenceInput: $("confidenceInput"),
   activationKeySelect: $("activationKeySelect"),
   predictionToggle: $("predictionToggle"),
+  autoMouseToggle: $("autoMouseToggle"),
   modelPath: $("modelPath"),
   showRuntimeBtn: $("showRuntimeBtn"),
   updateStatusBtn: $("updateStatusBtn"),
@@ -374,6 +378,9 @@ function applyLanguage(language) {
   }
   if (els.predictionToggle) {
     els.predictionToggle.checked = state.predictionEnabled;
+  }
+  if (els.autoMouseToggle) {
+    els.autoMouseToggle.checked = state.autoMouseEnabled;
   }
 
   document.querySelectorAll("[data-i18n]").forEach((node) => {
@@ -834,6 +841,7 @@ function currentInferenceOptions() {
     provider: els.providerSelect.value,
     activationKey: state.activationKey,
     predictionEnabled: state.predictionEnabled,
+    autoMouseEnabled: state.autoMouseEnabled,
     confidenceThreshold: Number.isFinite(confidence) ? confidence : DEFAULT_CONFIDENCE_THRESHOLD,
   };
 }
@@ -1273,6 +1281,12 @@ on(els.predictionToggle, "change", (event) => {
   log("Prediction overlay toggled", { enabled: state.predictionEnabled });
 });
 
+on(els.autoMouseToggle, "change", (event) => {
+  state.autoMouseEnabled = Boolean(event.target.checked);
+  localStorage.setItem("autoaim.autoMouseEnabled", state.autoMouseEnabled ? "true" : "false");
+  log("Auto mouse toggled", { enabled: state.autoMouseEnabled });
+});
+
 on(els.startLiveBtn, "click", async () => {
   await runAction(t("liveStarting"), async () => {
     if (state.livePolling) {
@@ -1288,6 +1302,7 @@ on(els.startLiveBtn, "click", async () => {
       previewFrameEnabled: state.previewFrameEnabled,
       recordDataset: state.recordDataset,
       predictionEnabled: state.predictionEnabled,
+      autoMouseEnabled: state.autoMouseEnabled,
       screenId: els.screenSelect.value || state.selectedScreenId,
       provider: els.providerSelect.value,
       modelPath: els.modelPath.value.trim(),

@@ -62,6 +62,14 @@ const LIVE_DATASET_MAX_FRAMES: u64 = 120;
 const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_MAX_DISTANCE_PX: f32 = 900.0;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_CONFIDENCE_WEIGHT: f32 = 0.60;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_DISTANCE_WEIGHT: f32 = 0.40;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_MIN_MOVE_PX: f32 = 1.0;
 static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static LIVE_ACTIVATION_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
@@ -92,6 +100,7 @@ const VK_XBUTTON2: i32 = 0x06;
 unsafe extern "system" {
     fn SetWindowDisplayAffinity(hwnd: isize, affinity: u32) -> i32;
     fn GetAsyncKeyState(virtual_key_code: i32) -> i16;
+    fn SetCursorPos(x: i32, y: i32) -> i32;
 }
 
 #[derive(Debug, Serialize)]
@@ -456,6 +465,7 @@ async fn live_monitor_snapshot(
     confidence_threshold: Option<f32>,
     activation_key: Option<String>,
     prediction_enabled: Option<bool>,
+    auto_mouse_enabled: Option<bool>,
     include_frame: Option<bool>,
 ) -> Result<LiveMonitorSnapshot, String> {
     let in_flight = app.state::<LiveSnapshotState>().in_flight.clone();
@@ -493,6 +503,7 @@ async fn live_monitor_snapshot(
             config,
             activation_key.unwrap_or_else(|| "alt".to_string()),
             prediction_enabled.unwrap_or(false),
+            auto_mouse_enabled.unwrap_or(false),
             include_frame.unwrap_or(true),
         )
     })
@@ -512,6 +523,7 @@ fn build_live_monitor_snapshot(
     config: NativeInferenceConfig,
     activation_key: String,
     prediction_enabled: bool,
+    auto_mouse_enabled: bool,
     include_frame: bool,
 ) -> Result<LiveMonitorSnapshot, String> {
     let sequence = LIVE_SNAPSHOT_SEQUENCE
@@ -583,6 +595,18 @@ fn build_live_monitor_snapshot(
         prediction_enabled,
     );
     let tracking_ms = tracking_started.elapsed().as_millis();
+    if auto_mouse_enabled {
+        maybe_move_mouse_to_target(
+            &people,
+            frame.cursor,
+            frame.cursor_on_screen,
+            screen.origin,
+            screen.size,
+            prediction_enabled,
+            sequence,
+            &screen.id,
+        );
+    }
     let capture_status = format!(
         "native Windows capture [{}]: {}x{} preview from {}x{} screen",
         frame.capture_backend.as_str(),
@@ -1146,6 +1170,103 @@ fn clamp_point_to_screen(point: Point, origin: [i32; 2], size: [u32; 2]) -> Poin
     let max_x = min_x + size[0].saturating_sub(1) as f32;
     let max_y = min_y + size[1].saturating_sub(1) as f32;
     [point[0].clamp(min_x, max_x), point[1].clamp(min_y, max_y)]
+}
+
+#[cfg(target_os = "windows")]
+fn maybe_move_mouse_to_target(
+    people: &[LivePersonPosition],
+    cursor: Point,
+    cursor_on_screen: bool,
+    screen_origin: [i32; 2],
+    screen_size: [u32; 2],
+    prediction_enabled: bool,
+    sequence: u64,
+    screen_id: &str,
+) {
+    if !cursor_on_screen {
+        return;
+    }
+
+    let Some(target_point) = best_auto_mouse_target(people, cursor, prediction_enabled) else {
+        return;
+    };
+    let target_point = clamp_point_to_screen(target_point, screen_origin, screen_size);
+    let move_dx = target_point[0] - cursor[0];
+    let move_dy = target_point[1] - cursor[1];
+    if (move_dx * move_dx + move_dy * move_dy).sqrt() < AUTO_MOUSE_MIN_MOVE_PX {
+        return;
+    }
+
+    let moved = unsafe {
+        SetCursorPos(
+            target_point[0].round() as i32,
+            target_point[1].round() as i32,
+        )
+    } != 0;
+    if !moved || should_log_live_snapshot(sequence, 0) {
+        append_app_log(
+            "backend",
+            if moved {
+                "auto mouse moved"
+            } else {
+                "auto mouse move failed"
+            },
+            Some(&format!(
+                r#"{{"sequence":{sequence},"screen_id":"{}","target":[{:.1},{:.1}],"dx":{:.1},"dy":{:.1},"people":{}}}"#,
+                json_escape(screen_id),
+                target_point[0],
+                target_point[1],
+                move_dx,
+                move_dy,
+                people.len()
+            )),
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn maybe_move_mouse_to_target(
+    _people: &[LivePersonPosition],
+    _cursor: Point,
+    _cursor_on_screen: bool,
+    _screen_origin: [i32; 2],
+    _screen_size: [u32; 2],
+    _prediction_enabled: bool,
+    _sequence: u64,
+    _screen_id: &str,
+) {
+}
+
+#[cfg(target_os = "windows")]
+fn best_auto_mouse_target(
+    people: &[LivePersonPosition],
+    cursor: Point,
+    prediction_enabled: bool,
+) -> Option<Point> {
+    people
+        .iter()
+        .filter(|person| person.class_name == "person")
+        .map(|person| {
+            let point = if prediction_enabled {
+                person.predicted_head_point
+            } else {
+                person.head_point
+            };
+            let dx = point[0] - cursor[0];
+            let dy = point[1] - cursor[1];
+            let distance = (dx * dx + dy * dy).sqrt().min(AUTO_MOUSE_MAX_DISTANCE_PX);
+            let distance_score = 1.0 - distance / AUTO_MOUSE_MAX_DISTANCE_PX;
+            let confidence_score = person.confidence.clamp(0.0, 1.0);
+            let score = confidence_score * AUTO_MOUSE_CONFIDENCE_WEIGHT
+                + distance_score * AUTO_MOUSE_DISTANCE_WEIGHT;
+            (point, score)
+        })
+        .max_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(point, _score)| point)
 }
 
 fn apply_live_tracking(

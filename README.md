@@ -114,6 +114,8 @@ The GUI can:
 - show the current mouse position in screen coordinates,
 - send live frames through the Rust detector interface and draw person/head
   positions returned by the backend,
+- optionally move the system cursor to the selected person/head point while the
+  activation key is held,
 - select a frame JSONL file,
 - validate dataset records,
 - evaluate suggestions and show metrics,

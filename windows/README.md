@@ -36,8 +36,10 @@ windows/
 
 The Rust runtime may read selected-window pixels through
 `Windows.Graphics.Capture` and emit overlay metadata. It must not call
-`SendInput`, install hooks for third-party games, write process memory, attach
-to game processes, or move the system cursor.
+`SendInput`, install hooks for third-party games, write process memory, or
+attach to game processes. The only cursor-control path is the explicit
+`Auto move mouse` toggle, which uses `SetCursorPos` while the configured
+activation key is held.
 
 ## Implemented Runtime Foundation
 
@@ -73,7 +75,8 @@ The package contains:
 
 On first launch, click `Start now`, choose the screen in the system picker, and
 the app displays the live preview, mouse coordinates, and detected person
-positions. The app does not move the system mouse or inject input.
+positions. If `Auto move mouse` is enabled, the app moves the system cursor to
+the selected person/head point while the activation key is held.
 
 ## Setup Installer
 
