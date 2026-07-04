@@ -1,0 +1,399 @@
+crates/autoaim-infer/src/lib.rs
+  s_0710826d2cab9d::t_bce82b26bb13a5 1334-1336,1343-1348,1355,1394-1396,1403-1408,1415-1435,2283 gitai:{"mixed_line_ranges":[{"Single":1347},{"Single":1432}],"operations":[{"operation_id":"6a48d940642460ddeddcbd2a","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[1334,1336]},{"Range":[1343,1348]},{"Single":1355},{"Range":[1394,1396]},{"Range":[1403,1408]},{"Range":[1415,1435]},{"Single":2283}]}]}
+  s_0710826d2cab9d::t_9310e6fa92673c 2286-2312 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a48d9a6642460ddeddcbd90","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[2286,2312]}]}]}
+  s_0710826d2cab9d::t_f788df326aba01 34-38 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a48d939642460ddeddcbd0f","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[34,38]}]}]}
+  s_0710826d2cab9d::t_1ed5c5b2af0cc7 2282
+  s_0710826d2cab9d::t_b8f16582e65478 2284-2285
+crates/autoaim-app/ui/main.js
+  s_0710826d2cab9d::t_a998dd536a5f72 248 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a48d923642460ddeddcbcdb","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":248}]}]}
+crates/autoaim-app/ui/index.html
+  s_0710826d2cab9d::t_5232dd6298fdbf 114 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a48d92d642460ddeddcbcf5","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":114}]}]}
+crates/autoaim-app/src/main.rs
+  s_0710826d2cab9d::t_25c65f388c5e8d 1186,1193-1200,1226,1228 gitai:{"mixed_line_ranges":[{"Single":1198}],"operations":[{"operation_id":"6a48d993642460ddeddcbd73","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":1186},{"Range":[1193,1200]},{"Single":1226},{"Single":1228}]}]}
+  s_0710826d2cab9d::t_05ef10e9d48bb4 57 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a48d91d642460ddeddcbcc1","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":57}]}]}
+  s_0710826d2cab9d::t_21d2607d737603 76,78,80 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a48d987642460ddeddcbd59","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":76},{"Single":78},{"Single":80}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "4c16b9f72ccc6fd0d8b2bca36ba7d998103af196",
+  "prompts": {},
+  "sessions": {
+    "s_0710826d2cab9d": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a48ce5c642460ddeddcb927",
+        "model": "gpt-5.5__max"
+      },
+      "human_author": "mashichen <mashichen.msc@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {
+    "crates/autoaim-app/src/main.rs": [
+      {
+        "hash": "s_0710826d2cab9d::t_25c65f388c5e8d",
+        "line_ranges": [
+          {
+            "Single": 1186
+          },
+          {
+            "Range": [
+              1193,
+              1200
+            ]
+          },
+          {
+            "Single": 1226
+          },
+          {
+            "Single": 1228
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 1198
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a48d993642460ddeddcbd73",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 1186
+              },
+              {
+                "Range": [
+                  1193,
+                  1200
+                ]
+              },
+              {
+                "Single": 1226
+              },
+              {
+                "Single": 1228
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "hash": "s_0710826d2cab9d::t_05ef10e9d48bb4",
+        "line_ranges": [
+          {
+            "Single": 57
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a48d91d642460ddeddcbcc1",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 57
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "hash": "s_0710826d2cab9d::t_21d2607d737603",
+        "line_ranges": [
+          {
+            "Single": 76
+          },
+          {
+            "Single": 78
+          },
+          {
+            "Single": 80
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a48d987642460ddeddcbd59",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 76
+              },
+              {
+                "Single": 78
+              },
+              {
+                "Single": 80
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/autoaim-app/ui/index.html": [
+      {
+        "hash": "s_0710826d2cab9d::t_5232dd6298fdbf",
+        "line_ranges": [
+          {
+            "Single": 114
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a48d92d642460ddeddcbcf5",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 114
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/autoaim-app/ui/main.js": [
+      {
+        "hash": "s_0710826d2cab9d::t_a998dd536a5f72",
+        "line_ranges": [
+          {
+            "Single": 248
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a48d923642460ddeddcbcdb",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 248
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/autoaim-infer/src/lib.rs": [
+      {
+        "hash": "s_0710826d2cab9d::t_bce82b26bb13a5",
+        "line_ranges": [
+          {
+            "Range": [
+              1334,
+              1336
+            ]
+          },
+          {
+            "Range": [
+              1343,
+              1348
+            ]
+          },
+          {
+            "Single": 1355
+          },
+          {
+            "Range": [
+              1394,
+              1396
+            ]
+          },
+          {
+            "Range": [
+              1403,
+              1408
+            ]
+          },
+          {
+            "Range": [
+              1415,
+              1435
+            ]
+          },
+          {
+            "Single": 2283
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 1347
+          },
+          {
+            "Single": 1432
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a48d940642460ddeddcbd2a",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  1334,
+                  1336
+                ]
+              },
+              {
+                "Range": [
+                  1343,
+                  1348
+                ]
+              },
+              {
+                "Single": 1355
+              },
+              {
+                "Range": [
+                  1394,
+                  1396
+                ]
+              },
+              {
+                "Range": [
+                  1403,
+                  1408
+                ]
+              },
+              {
+                "Range": [
+                  1415,
+                  1435
+                ]
+              },
+              {
+                "Single": 2283
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "hash": "s_0710826d2cab9d::t_9310e6fa92673c",
+        "line_ranges": [
+          {
+            "Range": [
+              2286,
+              2312
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a48d9a6642460ddeddcbd90",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  2286,
+                  2312
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "hash": "s_0710826d2cab9d::t_f788df326aba01",
+        "line_ranges": [
+          {
+            "Range": [
+              34,
+              38
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a48d939642460ddeddcbd0f",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  34,
+                  38
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "s_0710826d2cab9d": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_05ef10e9d48bb4": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_21d2607d737603": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_25c65f388c5e8d": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_5232dd6298fdbf": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_9310e6fa92673c": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_a998dd536a5f72": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_bce82b26bb13a5": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_0710826d2cab9d::t_f788df326aba01": {
+      "tool": "trae",
+      "conversation_id": "6a48ce5c642460ddeddcb927",
+      "session_id": "6a48ce5c642460ddeddcb927",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
