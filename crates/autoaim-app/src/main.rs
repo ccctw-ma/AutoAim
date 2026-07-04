@@ -38,6 +38,10 @@ use std::{
 };
 use tauri::Manager;
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -70,6 +74,10 @@ const AUTO_MOUSE_CONFIDENCE_WEIGHT: f32 = 0.60;
 const AUTO_MOUSE_DISTANCE_WEIGHT: f32 = 0.40;
 #[cfg(target_os = "windows")]
 const AUTO_MOUSE_MIN_MOVE_PX: f32 = 1.0;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_RELATIVE_GAIN: f32 = 0.20;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_MAX_RELATIVE_STEP: f32 = 80.0;
 static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static LIVE_ACTIVATION_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
@@ -100,7 +108,6 @@ const VK_XBUTTON2: i32 = 0x06;
 unsafe extern "system" {
     fn SetWindowDisplayAffinity(hwnd: isize, affinity: u32) -> i32;
     fn GetAsyncKeyState(virtual_key_code: i32) -> i16;
-    fn SetCursorPos(x: i32, y: i32) -> i32;
 }
 
 #[derive(Debug, Serialize)]
@@ -1176,33 +1183,30 @@ fn clamp_point_to_screen(point: Point, origin: [i32; 2], size: [u32; 2]) -> Poin
 fn maybe_move_mouse_to_target(
     people: &[LivePersonPosition],
     cursor: Point,
-    cursor_on_screen: bool,
+    _cursor_on_screen: bool,
     screen_origin: [i32; 2],
     screen_size: [u32; 2],
     prediction_enabled: bool,
     sequence: u64,
     screen_id: &str,
 ) {
-    if !cursor_on_screen {
-        return;
-    }
-
-    let Some(target_point) = best_auto_mouse_target(people, cursor, prediction_enabled) else {
+    let aim_anchor = screen_center_point(screen_origin, screen_size);
+    let Some(target_point) = best_auto_mouse_target(people, aim_anchor, prediction_enabled) else {
         return;
     };
     let target_point = clamp_point_to_screen(target_point, screen_origin, screen_size);
-    let move_dx = target_point[0] - cursor[0];
-    let move_dy = target_point[1] - cursor[1];
-    if (move_dx * move_dx + move_dy * move_dy).sqrt() < AUTO_MOUSE_MIN_MOVE_PX {
+    let aim_dx = target_point[0] - aim_anchor[0];
+    let aim_dy = target_point[1] - aim_anchor[1];
+    if (aim_dx * aim_dx + aim_dy * aim_dy).sqrt() < AUTO_MOUSE_MIN_MOVE_PX {
         return;
     }
 
-    let moved = unsafe {
-        SetCursorPos(
-            target_point[0].round() as i32,
-            target_point[1].round() as i32,
-        )
-    } != 0;
+    let [input_dx, input_dy] = relative_mouse_delta([aim_dx, aim_dy]);
+    if input_dx == 0 && input_dy == 0 {
+        return;
+    }
+
+    let moved = send_relative_mouse_move(input_dx, input_dy);
     if !moved || should_log_live_snapshot(sequence, 0) {
         append_app_log(
             "backend",
@@ -1212,16 +1216,68 @@ fn maybe_move_mouse_to_target(
                 "auto mouse move failed"
             },
             Some(&format!(
-                r#"{{"sequence":{sequence},"screen_id":"{}","target":[{:.1},{:.1}],"dx":{:.1},"dy":{:.1},"people":{}}}"#,
+                r#"{{"sequence":{sequence},"screen_id":"{}","mode":"relative_sendinput","anchor":[{:.1},{:.1}],"cursor":[{:.1},{:.1}],"target":[{:.1},{:.1}],"aim_dx":{:.1},"aim_dy":{:.1},"input_dx":{},"input_dy":{},"people":{}}}"#,
                 json_escape(screen_id),
+                aim_anchor[0],
+                aim_anchor[1],
+                cursor[0],
+                cursor[1],
                 target_point[0],
                 target_point[1],
-                move_dx,
-                move_dy,
+                aim_dx,
+                aim_dy,
+                input_dx,
+                input_dy,
                 people.len()
             )),
         );
     }
+}
+
+#[cfg(target_os = "windows")]
+fn screen_center_point(origin: [i32; 2], size: [u32; 2]) -> Point {
+    [
+        origin[0] as f32 + size[0] as f32 / 2.0,
+        origin[1] as f32 + size[1] as f32 / 2.0,
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn relative_mouse_delta(aim_delta: Point) -> [i32; 2] {
+    let scaled = [
+        aim_delta[0] * AUTO_MOUSE_RELATIVE_GAIN,
+        aim_delta[1] * AUTO_MOUSE_RELATIVE_GAIN,
+    ];
+    let clamped = clamp_vector_length(scaled, AUTO_MOUSE_MAX_RELATIVE_STEP);
+    [clamped[0].round() as i32, clamped[1].round() as i32]
+}
+
+#[cfg(target_os = "windows")]
+fn clamp_vector_length(value: Point, max_length: f32) -> Point {
+    let length = (value[0] * value[0] + value[1] * value[1]).sqrt();
+    if length <= max_length || length <= f32::EPSILON {
+        return value;
+    }
+    let scale = max_length / length;
+    [value[0] * scale, value[1] * scale]
+}
+
+#[cfg(target_os = "windows")]
+fn send_relative_mouse_move(dx: i32, dy: i32) -> bool {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) == 1 }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1240,7 +1296,7 @@ fn maybe_move_mouse_to_target(
 #[cfg(target_os = "windows")]
 fn best_auto_mouse_target(
     people: &[LivePersonPosition],
-    cursor: Point,
+    aim_anchor: Point,
     prediction_enabled: bool,
 ) -> Option<Point> {
     people
@@ -1252,8 +1308,8 @@ fn best_auto_mouse_target(
             } else {
                 person.head_point
             };
-            let dx = point[0] - cursor[0];
-            let dy = point[1] - cursor[1];
+            let dx = point[0] - aim_anchor[0];
+            let dy = point[1] - aim_anchor[1];
             let distance = (dx * dx + dy * dy).sqrt().min(AUTO_MOUSE_MAX_DISTANCE_PX);
             let distance_score = 1.0 - distance / AUTO_MOUSE_MAX_DISTANCE_PX;
             let confidence_score = person.confidence.clamp(0.0, 1.0);
