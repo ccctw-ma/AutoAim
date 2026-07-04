@@ -54,7 +54,7 @@ const BUNDLED_YOLOV8_POSE_ONNX_MODEL: &str = "models/yolov8n-pose.onnx";
 const BUNDLED_YOLOV8_ONNX_MODEL: &str = "models/yolov8n.onnx";
 const LIVE_CAPTURE_MAX_FRAME_SIZE: [u32; 2] = [1920, 1080];
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
-const DEFAULT_LIVE_CONFIDENCE_THRESHOLD: f32 = 0.35;
+const DEFAULT_LIVE_CONFIDENCE_THRESHOLD: f32 = 0.70;
 const LIVE_HEAD_PREDICTION_MS: u32 = 120;
 const LIVE_HEAD_VELOCITY_EMA_ALPHA: f32 = 0.35;
 const LIVE_HEAD_MAX_TRACK_DT_MS: f32 = 250.0;
@@ -73,11 +73,11 @@ const AUTO_MOUSE_CONFIDENCE_WEIGHT: f32 = 0.60;
 #[cfg(target_os = "windows")]
 const AUTO_MOUSE_DISTANCE_WEIGHT: f32 = 0.40;
 #[cfg(target_os = "windows")]
-const AUTO_MOUSE_MIN_MOVE_PX: f32 = 1.0;
+const AUTO_MOUSE_MIN_MOVE_PX: f32 = 2.0;
 #[cfg(target_os = "windows")]
-const AUTO_MOUSE_RELATIVE_GAIN: f32 = 0.20;
+const AUTO_MOUSE_RELATIVE_GAIN: f32 = 0.10;
 #[cfg(target_os = "windows")]
-const AUTO_MOUSE_MAX_RELATIVE_STEP: f32 = 80.0;
+const AUTO_MOUSE_MAX_RELATIVE_STEP: f32 = 24.0;
 static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static LIVE_ACTIVATION_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
@@ -1183,14 +1183,21 @@ fn clamp_point_to_screen(point: Point, origin: [i32; 2], size: [u32; 2]) -> Poin
 fn maybe_move_mouse_to_target(
     people: &[LivePersonPosition],
     cursor: Point,
-    _cursor_on_screen: bool,
+    cursor_on_screen: bool,
     screen_origin: [i32; 2],
     screen_size: [u32; 2],
     prediction_enabled: bool,
     sequence: u64,
     screen_id: &str,
 ) {
-    let aim_anchor = screen_center_point(screen_origin, screen_size);
+    let (aim_anchor, anchor_source) = if cursor_on_screen {
+        (cursor, "cursor")
+    } else {
+        (
+            screen_center_point(screen_origin, screen_size),
+            "screen_center",
+        )
+    };
     let Some(target_point) = best_auto_mouse_target(people, aim_anchor, prediction_enabled) else {
         return;
     };
@@ -1216,8 +1223,9 @@ fn maybe_move_mouse_to_target(
                 "auto mouse move failed"
             },
             Some(&format!(
-                r#"{{"sequence":{sequence},"screen_id":"{}","mode":"relative_sendinput","anchor":[{:.1},{:.1}],"cursor":[{:.1},{:.1}],"target":[{:.1},{:.1}],"aim_dx":{:.1},"aim_dy":{:.1},"input_dx":{},"input_dy":{},"people":{}}}"#,
+                r#"{{"sequence":{sequence},"screen_id":"{}","mode":"relative_sendinput","anchor_source":"{}","anchor":[{:.1},{:.1}],"cursor":[{:.1},{:.1}],"target":[{:.1},{:.1}],"aim_dx":{:.1},"aim_dy":{:.1},"input_dx":{},"input_dy":{},"people":{}}}"#,
                 json_escape(screen_id),
+                anchor_source,
                 aim_anchor[0],
                 aim_anchor[1],
                 cursor[0],
