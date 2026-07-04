@@ -5,7 +5,10 @@ use std::{
     error::Error,
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 #[cfg(all(feature = "ort-backend", feature = "movenet"))]
@@ -27,7 +30,11 @@ const YOLOV8_POSE_KEYPOINT_OFFSET: usize = 5;
 const YOLOV8_PERSON_CLASS_ID: usize = 0;
 const YOLOV8_NMS_IOU_THRESHOLD: f32 = 0.50;
 const YOLOV8_MAX_OBJECTS: usize = 32;
-const YOLOV8_MAX_SCAN_REGIONS: usize = 8;
+const YOLOV8_PRIMARY_SCAN_REGIONS: usize = 2;
+const YOLOV8_GRID_SCAN_INTERVAL: u64 = 4;
+const YOLOV8_GRID_COLUMNS: usize = 3;
+const YOLOV8_GRID_ROWS: usize = 2;
+const YOLOV8_GRID_REGION_COUNT: u64 = (YOLOV8_GRID_COLUMNS * YOLOV8_GRID_ROWS) as u64;
 const MOVENET_MAX_SCAN_POSES: usize = 4;
 const MOVENET_DUPLICATE_IOU_THRESHOLD: f32 = 0.35;
 pub const MOVENET_KEYPOINT_NAMES: [&str; MOVENET_KEYPOINT_COUNT] = [
@@ -279,6 +286,7 @@ pub struct NativePersonDetector {
     config: InferenceConfig,
     object_model: Option<Box<dyn ObjectModel>>,
     pose_model: Option<Box<dyn PoseModel>>,
+    yolo_scan_sequence: AtomicU64,
 }
 
 impl NativePersonDetector {
@@ -287,6 +295,7 @@ impl NativePersonDetector {
             config,
             object_model: None,
             pose_model: None,
+            yolo_scan_sequence: AtomicU64::new(0),
         }
     }
 
@@ -296,6 +305,7 @@ impl NativePersonDetector {
             config,
             object_model: None,
             pose_model: Some(pose_model),
+            yolo_scan_sequence: AtomicU64::new(0),
         }
     }
 
@@ -306,6 +316,7 @@ impl NativePersonDetector {
             config,
             object_model,
             pose_model,
+            yolo_scan_sequence: AtomicU64::new(0),
         })
     }
 }
@@ -313,8 +324,13 @@ impl NativePersonDetector {
 impl PersonDetector for NativePersonDetector {
     fn detect(&self, frame: &CapturedFrame) -> Result<InferenceOutput, InferenceError> {
         if let Some(object_model) = self.object_model.as_deref() {
-            let mut output =
-                detect_yolov8_people(frame, object_model, self.config.confidence_threshold)?;
+            let scan_sequence = self.yolo_scan_sequence.fetch_add(1, Ordering::Relaxed);
+            let mut output = detect_yolov8_people(
+                frame,
+                object_model,
+                self.config.confidence_threshold,
+                scan_sequence,
+            )?;
             let scan_status = output.model_status.clone();
             output.provider = self.config.provider;
             output.model_status = format!(
@@ -816,11 +832,12 @@ fn detect_yolov8_people<M: ObjectModel + ?Sized>(
     frame: &CapturedFrame,
     model: &M,
     threshold: f32,
+    scan_sequence: u64,
 ) -> Result<InferenceOutput, InferenceError> {
-    let regions = yolov8_scan_regions(frame);
-    let region_count = regions.len();
-    let mut outputs = Vec::with_capacity(region_count);
-    for region in regions {
+    let mut region_count = 0usize;
+    let mut outputs = Vec::with_capacity(YOLOV8_PRIMARY_SCAN_REGIONS + 1);
+    for region in yolov8_primary_scan_regions(frame) {
+        region_count += 1;
         let input = prepare_yolov8_input_region(frame, model.input_size(), region)?;
         let raw = model.infer(&input)?;
         outputs.push(decode_yolov8_people_output(
@@ -830,7 +847,20 @@ fn detect_yolov8_people<M: ObjectModel + ?Sized>(
             threshold,
         )?);
     }
-    let decoded = merge_yolov8_decoded_outputs(outputs);
+    let primary_decoded = merge_yolov8_decoded_outputs(outputs);
+    let should_scan_grid =
+        primary_decoded.objects.is_empty() || scan_sequence % YOLOV8_GRID_SCAN_INTERVAL == 0;
+    let decoded = if should_scan_grid {
+        let region = yolov8_grid_scan_region(frame, scan_sequence);
+        region_count += 1;
+        let input = prepare_yolov8_input_region(frame, model.input_size(), region)?;
+        let raw = model.infer(&input)?;
+        let grid_decoded =
+            decode_yolov8_people_output(&raw, &input.transform, input.size, threshold)?;
+        merge_yolov8_decoded_outputs(vec![primary_decoded, grid_decoded])
+    } else {
+        primary_decoded
+    };
     Ok(InferenceOutput {
         objects: decoded.objects,
         poses: decoded.poses,
@@ -933,16 +963,29 @@ struct YoloV8ScanRegion {
     size: [f32; 2],
 }
 
-fn yolov8_scan_regions(frame: &CapturedFrame) -> Vec<YoloV8ScanRegion> {
+fn yolov8_primary_scan_regions(frame: &CapturedFrame) -> Vec<YoloV8ScanRegion> {
     let [frame_width, frame_height] = frame.frame_size;
     let width = frame_width as f32;
     let height = frame_height as f32;
     let mut regions = Vec::new();
     push_yolov8_region(&mut regions, width, height, 0.0, 0.0, width, height);
-    push_center_yolov8_region(&mut regions, width, height, 0.70, 0.70);
-    push_yolov8_grid(&mut regions, width, height, 3, 2, 0.46, 0.62);
-    regions.truncate(YOLOV8_MAX_SCAN_REGIONS);
+    push_center_yolov8_region(&mut regions, width, height, 0.38, 0.54);
     regions
+}
+
+fn yolov8_grid_scan_region(frame: &CapturedFrame, scan_sequence: u64) -> YoloV8ScanRegion {
+    let [frame_width, frame_height] = frame.frame_size;
+    let width = frame_width as f32;
+    let height = frame_height as f32;
+    build_yolov8_grid_cell(
+        width,
+        height,
+        YOLOV8_GRID_COLUMNS,
+        YOLOV8_GRID_ROWS,
+        0.46,
+        0.62,
+        scan_sequence % YOLOV8_GRID_REGION_COUNT,
+    )
 }
 
 fn push_center_yolov8_region(
@@ -967,34 +1010,39 @@ fn push_center_yolov8_region(
     );
 }
 
-fn push_yolov8_grid(
-    regions: &mut Vec<YoloV8ScanRegion>,
+fn build_yolov8_grid_cell(
     frame_width: f32,
     frame_height: f32,
     columns: usize,
     rows: usize,
     width_ratio: f32,
     height_ratio: f32,
-) {
+    cell_index: u64,
+) -> YoloV8ScanRegion {
+    if columns == 0 || rows == 0 {
+        return YoloV8ScanRegion {
+            origin: [0.0, 0.0],
+            size: [frame_width.max(1.0), frame_height.max(1.0)],
+        };
+    }
+    let cell_index = cell_index as usize % (columns * rows);
+    let row = cell_index / columns;
+    let column = cell_index % columns;
     let width = frame_width * width_ratio;
     let height = frame_height * height_ratio;
     let max_x = (frame_width - width).max(0.0);
     let max_y = (frame_height - height).max(0.0);
-    for row in 0..rows {
-        let y = if rows <= 1 {
-            max_y / 2.0
-        } else {
-            max_y * row as f32 / (rows - 1) as f32
-        };
-        for column in 0..columns {
-            let x = if columns <= 1 {
-                max_x / 2.0
-            } else {
-                max_x * column as f32 / (columns - 1) as f32
-            };
-            push_yolov8_region(regions, frame_width, frame_height, x, y, width, height);
-        }
-    }
+    let y = if rows <= 1 {
+        max_y / 2.0
+    } else {
+        max_y * row as f32 / (rows - 1) as f32
+    };
+    let x = if columns <= 1 {
+        max_x / 2.0
+    } else {
+        max_x * column as f32 / (columns - 1) as f32
+    };
+    clamp_yolov8_region(frame_width, frame_height, x, y, width, height)
 }
 
 fn push_yolov8_region(
@@ -1009,21 +1057,33 @@ fn push_yolov8_region(
     if width < 8.0 || height < 8.0 {
         return;
     }
+    let region = clamp_yolov8_region(frame_width, frame_height, origin_x, origin_y, width, height);
+    let duplicate = regions.iter().any(|existing| {
+        (existing.origin[0] - region.origin[0]).abs() < 1.0
+            && (existing.origin[1] - region.origin[1]).abs() < 1.0
+            && (existing.size[0] - region.size[0]).abs() < 1.0
+            && (existing.size[1] - region.size[1]).abs() < 1.0
+    });
+    if !duplicate {
+        regions.push(region);
+    }
+}
+
+fn clamp_yolov8_region(
+    frame_width: f32,
+    frame_height: f32,
+    origin_x: f32,
+    origin_y: f32,
+    width: f32,
+    height: f32,
+) -> YoloV8ScanRegion {
     let origin_x = origin_x.clamp(0.0, (frame_width - 1.0).max(0.0));
     let origin_y = origin_y.clamp(0.0, (frame_height - 1.0).max(0.0));
     let width = width.min(frame_width - origin_x).max(1.0);
     let height = height.min(frame_height - origin_y).max(1.0);
-    let duplicate = regions.iter().any(|existing| {
-        (existing.origin[0] - origin_x).abs() < 1.0
-            && (existing.origin[1] - origin_y).abs() < 1.0
-            && (existing.size[0] - width).abs() < 1.0
-            && (existing.size[1] - height).abs() < 1.0
-    });
-    if !duplicate {
-        regions.push(YoloV8ScanRegion {
-            origin: [origin_x, origin_y],
-            size: [width, height],
-        });
+    YoloV8ScanRegion {
+        origin: [origin_x, origin_y],
+        size: [width, height],
     }
 }
 
@@ -2077,17 +2137,28 @@ mod tests {
     }
 
     #[test]
-    fn yolov8_scan_regions_include_full_frame_and_zoomed_tiles() {
+    fn yolov8_primary_scan_regions_include_full_frame_and_center_zoom() {
         let frame = frame_with_blob(640, 360);
-        let regions = yolov8_scan_regions(&frame);
+        let regions = yolov8_primary_scan_regions(&frame);
 
-        assert_eq!(regions.len(), YOLOV8_MAX_SCAN_REGIONS);
+        assert_eq!(regions.len(), YOLOV8_PRIMARY_SCAN_REGIONS);
         assert_eq!(regions[0].origin, [0.0, 0.0]);
         assert_eq!(regions[0].size, [640.0, 360.0]);
         assert!(regions
             .iter()
             .skip(1)
             .any(|region| region.size[0] < 640.0 && region.size[1] < 360.0));
+    }
+
+    #[test]
+    fn yolov8_grid_scan_region_rotates_across_frames() {
+        let frame = frame_with_blob(640, 360);
+        let first = yolov8_grid_scan_region(&frame, 0);
+        let second = yolov8_grid_scan_region(&frame, 1);
+
+        assert_ne!(first, second);
+        assert!(first.size[0] < 640.0);
+        assert!(first.size[1] < 360.0);
     }
 
     #[test]
