@@ -26,7 +26,8 @@ const YOLOV8_POSE_OUTPUT_CHANNELS: usize = 56;
 const YOLOV8_POSE_KEYPOINT_OFFSET: usize = 5;
 const YOLOV8_PERSON_CLASS_ID: usize = 0;
 const YOLOV8_NMS_IOU_THRESHOLD: f32 = 0.50;
-const YOLOV8_MAX_OBJECTS: usize = 20;
+const YOLOV8_MAX_OBJECTS: usize = 32;
+const YOLOV8_MAX_SCAN_REGIONS: usize = 8;
 const MOVENET_MAX_SCAN_POSES: usize = 4;
 const MOVENET_DUPLICATE_IOU_THRESHOLD: f32 = 0.35;
 pub const MOVENET_KEYPOINT_NAMES: [&str; MOVENET_KEYPOINT_COUNT] = [
@@ -314,13 +315,15 @@ impl PersonDetector for NativePersonDetector {
         if let Some(object_model) = self.object_model.as_deref() {
             let mut output =
                 detect_yolov8_people(frame, object_model, self.config.confidence_threshold)?;
+            let scan_status = output.model_status.clone();
             output.provider = self.config.provider;
             output.model_status = format!(
-                "YOLOv8 {} backend active; requested provider {}; {} pose(s) and {} person object(s) produced",
+                "YOLOv8 {} backend active; requested provider {}; {} pose(s) and {} person object(s) produced; {}",
                 object_model.runtime_name(),
                 self.config.provider.as_str(),
                 output.poses.len(),
-                output.objects.len()
+                output.objects.len(),
+                scan_status
             );
             return Ok(output);
         }
@@ -814,20 +817,47 @@ fn detect_yolov8_people<M: ObjectModel + ?Sized>(
     model: &M,
     threshold: f32,
 ) -> Result<InferenceOutput, InferenceError> {
-    let input = prepare_yolov8_input(frame, model.input_size())?;
-    let raw = model.infer(&input)?;
-    let decoded = decode_yolov8_people_output(&raw, &input.transform, input.size, threshold)?;
+    let regions = yolov8_scan_regions(frame);
+    let region_count = regions.len();
+    let mut outputs = Vec::with_capacity(region_count);
+    for region in regions {
+        let input = prepare_yolov8_input_region(frame, model.input_size(), region)?;
+        let raw = model.infer(&input)?;
+        outputs.push(decode_yolov8_people_output(
+            &raw,
+            &input.transform,
+            input.size,
+            threshold,
+        )?);
+    }
+    let decoded = merge_yolov8_decoded_outputs(outputs);
     Ok(InferenceOutput {
         objects: decoded.objects,
         poses: decoded.poses,
         provider: NativeInferenceProvider::Cpu,
-        model_status: String::new(),
+        model_status: format!("scanned {region_count} YOLOv8 region(s)"),
     })
 }
 
 pub fn prepare_yolov8_input(
     frame: &CapturedFrame,
     input_size: u32,
+) -> Result<YoloV8Input, InferenceError> {
+    let [frame_width, frame_height] = frame.frame_size;
+    prepare_yolov8_input_region(
+        frame,
+        input_size,
+        YoloV8ScanRegion {
+            origin: [0.0, 0.0],
+            size: [frame_width as f32, frame_height as f32],
+        },
+    )
+}
+
+fn prepare_yolov8_input_region(
+    frame: &CapturedFrame,
+    input_size: u32,
+    region: YoloV8ScanRegion,
 ) -> Result<YoloV8Input, InferenceError> {
     let [frame_width, frame_height] = frame.frame_size;
     if input_size == 0
@@ -840,10 +870,17 @@ pub fn prepare_yolov8_input(
         ));
     }
 
-    let scale =
-        (input_size as f32 / frame_width as f32).min(input_size as f32 / frame_height as f32);
-    let resized_width = frame_width as f32 * scale;
-    let resized_height = frame_height as f32 * scale;
+    let source_width = region.size[0].clamp(1.0, frame_width as f32);
+    let source_height = region.size[1].clamp(1.0, frame_height as f32);
+    let source_origin_x = region.origin[0].clamp(0.0, frame_width.saturating_sub(1) as f32);
+    let source_origin_y = region.origin[1].clamp(0.0, frame_height.saturating_sub(1) as f32);
+    let max_source_width = frame_width as f32 - source_origin_x;
+    let max_source_height = frame_height as f32 - source_origin_y;
+    let source_width = source_width.min(max_source_width.max(1.0));
+    let source_height = source_height.min(max_source_height.max(1.0));
+    let scale = (input_size as f32 / source_width).min(input_size as f32 / source_height);
+    let resized_width = source_width * scale;
+    let resized_height = source_height * scale;
     let pad_x = (input_size as f32 - resized_width) / 2.0;
     let pad_y = (input_size as f32 - resized_height) / 2.0;
     let input_size = input_size as usize;
@@ -852,12 +889,14 @@ pub fn prepare_yolov8_input(
 
     for dst_y in 0..input_size {
         for dst_x in 0..input_size {
-            let src_x = ((dst_x as f32 + 0.5 - pad_x) / scale).floor();
-            let src_y = ((dst_y as f32 + 0.5 - pad_y) / scale).floor();
+            let src_x = source_origin_x + ((dst_x as f32 + 0.5 - pad_x) / scale).floor();
+            let src_y = source_origin_y + ((dst_y as f32 + 0.5 - pad_y) / scale).floor();
             if src_x < 0.0
                 || src_y < 0.0
                 || src_x >= frame_width as f32
                 || src_y >= frame_height as f32
+                || src_x >= source_origin_x + source_width
+                || src_y >= source_origin_y + source_height
             {
                 continue;
             }
@@ -877,8 +916,8 @@ pub fn prepare_yolov8_input(
         rgb,
         transform: FrameToModelTransform {
             frame_size: frame.frame_size,
-            source_origin: [0.0, 0.0],
-            source_size: [frame_width as f32, frame_height as f32],
+            source_origin: [source_origin_x, source_origin_y],
+            source_size: [source_width, source_height],
             screen_origin: frame.screen_origin,
             screen_size: frame.screen_size,
             scale,
@@ -886,6 +925,106 @@ pub fn prepare_yolov8_input(
             pad_y,
         },
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct YoloV8ScanRegion {
+    origin: [f32; 2],
+    size: [f32; 2],
+}
+
+fn yolov8_scan_regions(frame: &CapturedFrame) -> Vec<YoloV8ScanRegion> {
+    let [frame_width, frame_height] = frame.frame_size;
+    let width = frame_width as f32;
+    let height = frame_height as f32;
+    let mut regions = Vec::new();
+    push_yolov8_region(&mut regions, width, height, 0.0, 0.0, width, height);
+    push_center_yolov8_region(&mut regions, width, height, 0.70, 0.70);
+    push_yolov8_grid(&mut regions, width, height, 3, 2, 0.46, 0.62);
+    regions.truncate(YOLOV8_MAX_SCAN_REGIONS);
+    regions
+}
+
+fn push_center_yolov8_region(
+    regions: &mut Vec<YoloV8ScanRegion>,
+    frame_width: f32,
+    frame_height: f32,
+    width_ratio: f32,
+    height_ratio: f32,
+) {
+    let width = frame_width * width_ratio;
+    let height = frame_height * height_ratio;
+    let origin_x = (frame_width - width) / 2.0;
+    let origin_y = (frame_height - height) / 2.0;
+    push_yolov8_region(
+        regions,
+        frame_width,
+        frame_height,
+        origin_x,
+        origin_y,
+        width,
+        height,
+    );
+}
+
+fn push_yolov8_grid(
+    regions: &mut Vec<YoloV8ScanRegion>,
+    frame_width: f32,
+    frame_height: f32,
+    columns: usize,
+    rows: usize,
+    width_ratio: f32,
+    height_ratio: f32,
+) {
+    let width = frame_width * width_ratio;
+    let height = frame_height * height_ratio;
+    let max_x = (frame_width - width).max(0.0);
+    let max_y = (frame_height - height).max(0.0);
+    for row in 0..rows {
+        let y = if rows <= 1 {
+            max_y / 2.0
+        } else {
+            max_y * row as f32 / (rows - 1) as f32
+        };
+        for column in 0..columns {
+            let x = if columns <= 1 {
+                max_x / 2.0
+            } else {
+                max_x * column as f32 / (columns - 1) as f32
+            };
+            push_yolov8_region(regions, frame_width, frame_height, x, y, width, height);
+        }
+    }
+}
+
+fn push_yolov8_region(
+    regions: &mut Vec<YoloV8ScanRegion>,
+    frame_width: f32,
+    frame_height: f32,
+    origin_x: f32,
+    origin_y: f32,
+    width: f32,
+    height: f32,
+) {
+    if width < 8.0 || height < 8.0 {
+        return;
+    }
+    let origin_x = origin_x.clamp(0.0, (frame_width - 1.0).max(0.0));
+    let origin_y = origin_y.clamp(0.0, (frame_height - 1.0).max(0.0));
+    let width = width.min(frame_width - origin_x).max(1.0);
+    let height = height.min(frame_height - origin_y).max(1.0);
+    let duplicate = regions.iter().any(|existing| {
+        (existing.origin[0] - origin_x).abs() < 1.0
+            && (existing.origin[1] - origin_y).abs() < 1.0
+            && (existing.size[0] - width).abs() < 1.0
+            && (existing.size[1] - height).abs() < 1.0
+    });
+    if !duplicate {
+        regions.push(YoloV8ScanRegion {
+            origin: [origin_x, origin_y],
+            size: [width, height],
+        });
+    }
 }
 
 pub fn decode_yolov8_people_output(
@@ -937,6 +1076,25 @@ pub fn decode_yolov8_people_output(
         candidates.push(YoloV8Candidate { object, pose });
     }
 
+    Ok(select_yolov8_candidates(candidates))
+}
+
+fn merge_yolov8_decoded_outputs(outputs: Vec<YoloV8DecodedOutput>) -> YoloV8DecodedOutput {
+    let mut candidates = Vec::new();
+    for output in outputs {
+        let poses = output.poses;
+        for (index, mut object) in output.objects.into_iter().enumerate() {
+            object.track_id = None;
+            candidates.push(YoloV8Candidate {
+                object,
+                pose: poses.get(index).cloned(),
+            });
+        }
+    }
+    select_yolov8_candidates(candidates)
+}
+
+fn select_yolov8_candidates(mut candidates: Vec<YoloV8Candidate>) -> YoloV8DecodedOutput {
     candidates.sort_by(|left, right| {
         right
             .object
@@ -967,7 +1125,7 @@ pub fn decode_yolov8_people_output(
             poses.push(pose);
         }
     }
-    Ok(YoloV8DecodedOutput { objects, poses })
+    YoloV8DecodedOutput { objects, poses }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1916,6 +2074,79 @@ mod tests {
         assert_near(decoded.poses[0].keypoints[0].score, 0.80);
         assert_near(decoded.poses[0].bbox[0], decoded.objects[0].bbox[0]);
         assert_near(decoded.poses[0].bbox[1], decoded.objects[0].bbox[1]);
+    }
+
+    #[test]
+    fn yolov8_scan_regions_include_full_frame_and_zoomed_tiles() {
+        let frame = frame_with_blob(640, 360);
+        let regions = yolov8_scan_regions(&frame);
+
+        assert_eq!(regions.len(), YOLOV8_MAX_SCAN_REGIONS);
+        assert_eq!(regions[0].origin, [0.0, 0.0]);
+        assert_eq!(regions[0].size, [640.0, 360.0]);
+        assert!(regions
+            .iter()
+            .skip(1)
+            .any(|region| region.size[0] < 640.0 && region.size[1] < 360.0));
+    }
+
+    #[test]
+    fn yolov8_region_preprocess_maps_crop_back_to_screen_space() {
+        let frame = frame_with_blob(640, 360);
+        let input = prepare_yolov8_input_region(
+            &frame,
+            YOLOV8_INPUT_SIZE,
+            YoloV8ScanRegion {
+                origin: [160.0, 90.0],
+                size: [320.0, 180.0],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(input.transform.source_origin, [160.0, 90.0]);
+        assert_eq!(input.transform.source_size, [320.0, 180.0]);
+        assert_near(input.transform.scale, 2.0);
+        assert_near(input.transform.pad_x, 0.0);
+        assert_near(input.transform.pad_y, 140.0);
+
+        let top_left = input.transform.model_point_to_screen(0.0, 140.0);
+        assert_near(top_left[0], 340.0);
+        assert_near(top_left[1], 230.0);
+    }
+
+    #[test]
+    fn yolov8_merge_dedupes_objects_across_scan_regions() {
+        let first = DetectionObject {
+            class_name: "person".to_string(),
+            bbox: [10.0, 20.0, 40.0, 80.0],
+            head_bbox: None,
+            head_point: Some([30.0, 34.0]),
+            confidence: 0.80,
+            track_id: Some(99),
+        };
+        let second = DetectionObject {
+            class_name: "person".to_string(),
+            bbox: [12.0, 22.0, 40.0, 80.0],
+            head_bbox: None,
+            head_point: Some([32.0, 36.0]),
+            confidence: 0.95,
+            track_id: Some(100),
+        };
+
+        let decoded = merge_yolov8_decoded_outputs(vec![
+            YoloV8DecodedOutput {
+                objects: vec![first],
+                poses: Vec::new(),
+            },
+            YoloV8DecodedOutput {
+                objects: vec![second],
+                poses: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(decoded.objects.len(), 1);
+        assert_near(decoded.objects[0].confidence, 0.95);
+        assert_eq!(decoded.objects[0].track_id, Some(1));
     }
 
     #[test]

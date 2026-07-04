@@ -3,7 +3,9 @@
     windows_subsystem = "windows"
 )]
 
-use autoaim_capture::{cursor_position, CapturedFrame, CapturedFramePreview, ScreenCapturer};
+use autoaim_capture::{
+    cursor_position, scaled_frame_size, CapturedFrame, CapturedFramePreview, ScreenCapturer,
+};
 use autoaim_core::{
     read_jsonl_path, suggest_frames, summarize, validate_records, DetectionObject, MetricsSummary,
     ObjectTracker, Point, TargetScorer, ValidationDiagnostic,
@@ -42,6 +44,7 @@ const BUNDLED_MOVENET_ONNX_MODEL: &str = "models/movenet_lightning.onnx";
 const BUNDLED_MOVENET_TFLITE_MODEL: &str = "models/movenet_lightning.tflite";
 const BUNDLED_YOLOV8_POSE_ONNX_MODEL: &str = "models/yolov8n-pose.onnx";
 const BUNDLED_YOLOV8_ONNX_MODEL: &str = "models/yolov8n.onnx";
+const LIVE_CAPTURE_MAX_FRAME_SIZE: [u32; 2] = [1920, 1080];
 const LIVE_PREVIEW_MAX_FRAME_SIZE: [u32; 2] = [640, 360];
 const LIVE_SNAPSHOT_SLOW_MS: u128 = 100;
 const LIVE_SNAPSHOT_LOG_EVERY: u64 = 60;
@@ -421,7 +424,7 @@ fn build_live_monitor_snapshot(
         },
     );
     let frame_preview = if include_frame {
-        Some(CapturedFramePreview::from(&frame))
+        Some(live_frame_preview(&frame))
     } else {
         None
     };
@@ -501,7 +504,7 @@ fn capture_with_cached_capturer(
         .map(|capturer| !capturer.is_alive() || !capturer.matches(screen.origin, screen.size))
         .unwrap_or(true);
     if needs_new {
-        let capturer = ScreenCapturer::new(screen.origin, screen.size, LIVE_PREVIEW_MAX_FRAME_SIZE)
+        let capturer = ScreenCapturer::new(screen.origin, screen.size, LIVE_CAPTURE_MAX_FRAME_SIZE)
             .map_err(|error| error.to_string())?;
         *cached = Some(capturer);
     }
@@ -521,6 +524,66 @@ fn capture_with_cached_capturer(
     }
 
     result.map_err(|error| error.to_string())
+}
+
+fn live_frame_preview(frame: &CapturedFrame) -> CapturedFramePreview {
+    let preview_size = scaled_frame_size(frame.frame_size, LIVE_PREVIEW_MAX_FRAME_SIZE)
+        .unwrap_or(LIVE_PREVIEW_MAX_FRAME_SIZE);
+    if preview_size == frame.frame_size {
+        return CapturedFramePreview::from(frame);
+    }
+
+    let rgba = resize_rgba_nearest(&frame.rgba, frame.frame_size, preview_size);
+    let preview_frame = CapturedFrame {
+        screen_origin: frame.screen_origin,
+        screen_size: frame.screen_size,
+        frame_size: preview_size,
+        capture_backend: frame.capture_backend,
+        rgba,
+        cursor: frame.cursor,
+        cursor_on_screen: frame.cursor_on_screen,
+        timestamp_millis: frame.timestamp_millis,
+    };
+    CapturedFramePreview::from(&preview_frame)
+}
+
+fn resize_rgba_nearest(rgba: &[u8], source_size: [u32; 2], target_size: [u32; 2]) -> Vec<u8> {
+    let [source_width, source_height] = source_size;
+    let [target_width, target_height] = target_size;
+    if source_width == 0
+        || source_height == 0
+        || target_width == 0
+        || target_height == 0
+        || rgba.len() != source_width as usize * source_height as usize * 4
+    {
+        return Vec::new();
+    }
+
+    let source_width = source_width as usize;
+    let source_height = source_height as usize;
+    let target_width = target_width as usize;
+    let target_height = target_height as usize;
+    let scale_x = source_width as f32 / target_width as f32;
+    let scale_y = source_height as f32 / target_height as f32;
+    let mut resized = vec![0_u8; target_width * target_height * 4];
+
+    for target_y in 0..target_height {
+        let source_y = ((target_y as f32 + 0.5) * scale_y)
+            .floor()
+            .clamp(0.0, source_height.saturating_sub(1) as f32) as usize;
+        for target_x in 0..target_width {
+            let source_x = ((target_x as f32 + 0.5) * scale_x)
+                .floor()
+                .clamp(0.0, source_width.saturating_sub(1) as f32)
+                as usize;
+            let source_index = (source_y * source_width + source_x) * 4;
+            let target_index = (target_y * target_width + target_x) * 4;
+            resized[target_index..target_index + 4]
+                .copy_from_slice(&rgba[source_index..source_index + 4]);
+        }
+    }
+
+    resized
 }
 
 fn detect_with_cached_live_detector(
