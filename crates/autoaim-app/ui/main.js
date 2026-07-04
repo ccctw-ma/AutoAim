@@ -56,6 +56,7 @@ const i18n = {
     runtimeTitle: "Inference",
     provider: "Provider",
     threshold: "Confidence",
+    activationKey: "Activation key",
     modelPath: "Model path",
     modelPathPlaceholder: "Bundled model",
     showRuntime: "Show config",
@@ -167,6 +168,7 @@ const i18n = {
     runtimeTitle: "推理",
     provider: "推理后端",
     threshold: "置信度",
+    activationKey: "激活键",
     modelPath: "模型路径",
     modelPathPlaceholder: "使用内置模型",
     showRuntime: "显示配置",
@@ -272,6 +274,7 @@ const state = {
   lastSnapshotSummary: null,
   liveDatasetPath: null,
   compactMode: localStorage.getItem("autoaim.compactMode") === "true",
+  activationKey: localStorage.getItem("autoaim.activationKey") || "alt",
   previewFrameEnabled: localStorage.getItem("autoaim.previewFrame") !== "false",
   screens: [],
   selectedScreenId: null,
@@ -319,6 +322,7 @@ const els = {
   writeBtn: $("writeBtn"),
   providerSelect: $("providerSelect"),
   confidenceInput: $("confidenceInput"),
+  activationKeySelect: $("activationKeySelect"),
   modelPath: $("modelPath"),
   showRuntimeBtn: $("showRuntimeBtn"),
   updateStatusBtn: $("updateStatusBtn"),
@@ -346,6 +350,9 @@ function applyLanguage(language) {
   document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
   if (els.languageSelect) {
     els.languageSelect.value = language;
+  }
+  if (els.activationKeySelect) {
+    els.activationKeySelect.value = state.activationKey;
   }
 
   document.querySelectorAll("[data-i18n]").forEach((node) => {
@@ -794,6 +801,7 @@ function currentInferenceOptions() {
   return {
     modelPath: els.modelPath.value.trim(),
     provider: els.providerSelect.value,
+    activationKey: state.activationKey,
     confidenceThreshold: Number.isFinite(confidence) ? confidence : 0.25,
   };
 }
@@ -1212,6 +1220,12 @@ on(els.refreshScreensBtn, "click", async () => {
 
 on(els.screenSelect, "change", (event) => {
   state.selectedScreenId = event.target.value;
+});
+
+on(els.activationKeySelect, "change", (event) => {
+  state.activationKey = event.target.value || "alt";
+  localStorage.setItem("autoaim.activationKey", state.activationKey);
+  log("Activation key changed", { activationKey: state.activationKey });
 });
 
 on(els.startLiveBtn, "click", async () => {

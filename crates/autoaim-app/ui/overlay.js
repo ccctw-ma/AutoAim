@@ -22,6 +22,7 @@ const SKELETON_CONNECTIONS = [
   ["right_knee", "right_ankle"],
 ];
 let latestSnapshot = null;
+let overlaySnapshotLogCount = 0;
 let overlayCursorLogCount = 0;
 
 function overlayLog(message, data) {
@@ -162,12 +163,15 @@ function drawCursorSnapshot(snapshot) {
 
 if (eventApi?.listen) {
   eventApi.listen("overlay_snapshot", (event) => {
-    overlayLog("overlay_snapshot", {
-      people: (event.payload.people || []).length,
-      cursor: event.payload.cursor,
-      cursor_on_screen: event.payload.cursor_on_screen,
-      screen_id: event.payload.screen_id,
-    });
+    overlaySnapshotLogCount += 1;
+    if (overlaySnapshotLogCount <= 3 || overlaySnapshotLogCount % 60 === 0) {
+      overlayLog("overlay_snapshot", {
+        people: (event.payload.people || []).length,
+        cursor: event.payload.cursor,
+        cursor_on_screen: event.payload.cursor_on_screen,
+        screen_id: event.payload.screen_id,
+      });
+    }
     drawSnapshot(event.payload);
   });
   eventApi.listen("overlay_cursor", (event) => {

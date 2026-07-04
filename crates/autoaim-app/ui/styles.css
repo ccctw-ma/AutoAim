@@ -965,7 +965,7 @@ body.compact-mode .workspace {
 
 body.compact-mode {
   min-height: 100vh;
-  overflow: hidden;
+  overflow: auto;
   background: #ffffff;
 }
 
@@ -987,8 +987,7 @@ body.compact-mode .title-block,
 body.compact-mode #updateStatusBtn,
 body.compact-mode .select-label,
 body.compact-mode #languageSelect,
-body.compact-mode .panel-heading,
-body.compact-mode .control-strip {
+body.compact-mode .panel-heading {
   display: none;
 }
 
@@ -1009,18 +1008,23 @@ body.compact-mode .live-readouts {
 }
 
 body.compact-mode .control-strip {
-  grid-template-columns: minmax(220px, 1fr) repeat(4, auto);
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 6px;
 }
 
-body.compact-mode #showOverlayBtn,
-body.compact-mode #hideOverlayBtn,
+body.compact-mode .control-strip .screen-field {
+  grid-column: 1 / -1;
+}
+
 body.compact-mode .checkbox-toggle {
-  display: none;
+  justify-content: center;
 }
 
 body.compact-mode .compact-dashboard {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   margin-top: 0;
 }
 

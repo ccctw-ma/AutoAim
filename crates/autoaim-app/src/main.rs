@@ -55,10 +55,19 @@ const OVERLAY_WINDOW_LABEL: &str = "live-overlay";
 const OVERLAY_CURSOR_INTERVAL_MS: u64 = 50;
 const OVERLAY_CURSOR_LOG_EVERY_TICKS: u64 = 60;
 static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static LIVE_ACTIVATION_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 #[cfg(target_os = "windows")]
 const VK_MENU: i32 = 0x12;
+#[cfg(target_os = "windows")]
+const VK_SHIFT: i32 = 0x10;
+#[cfg(target_os = "windows")]
+const VK_CONTROL: i32 = 0x11;
+#[cfg(target_os = "windows")]
+const VK_SPACE: i32 = 0x20;
+#[cfg(target_os = "windows")]
+const VK_RBUTTON: i32 = 0x02;
 
 #[cfg(target_os = "windows")]
 #[link(name = "user32")]
@@ -283,13 +292,13 @@ struct LiveDatasetState {
 
 #[derive(Default)]
 struct SystemTelemetryState {
-    cache: Mutex<SystemTelemetryCache>,
+    cache: Arc<Mutex<SystemTelemetryCache>>,
 }
 
 #[derive(Default)]
 struct SystemTelemetryCache {
+    telemetry: SystemTelemetry,
     cpu_sample: Option<CpuTimesSample>,
-    gpu_sample: Option<GpuTelemetrySample>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -300,7 +309,6 @@ struct CpuTimesSample {
 
 #[derive(Clone, Debug)]
 struct GpuTelemetrySample {
-    sampled_at: Instant,
     usage_percent: Option<f32>,
     memory_used_mb: Option<u64>,
     memory_total_mb: Option<u64>,
@@ -372,12 +380,12 @@ fn list_screens(window: tauri::Window) -> Result<Vec<ScreenInfo>, String> {
 #[tauri::command]
 fn set_compact_window(window: tauri::Window, compact: bool) -> Result<(), String> {
     if compact {
-        let compact_size = tauri::PhysicalSize::new(460_u32, 320_u32);
+        let compact_size = tauri::PhysicalSize::new(520_u32, 420_u32);
         window
             .set_always_on_top(true)
             .map_err(|error| format!("failed to set compact window topmost: {error}"))?;
         window
-            .set_resizable(false)
+            .set_resizable(true)
             .map_err(|error| format!("failed to set compact window resizable: {error}"))?;
         window
             .set_size(compact_size)
@@ -411,6 +419,7 @@ async fn live_monitor_snapshot(
     model_path: Option<String>,
     provider: Option<String>,
     confidence_threshold: Option<f32>,
+    activation_key: Option<String>,
     include_frame: Option<bool>,
 ) -> Result<LiveMonitorSnapshot, String> {
     let in_flight = app.state::<LiveSnapshotState>().in_flight.clone();
@@ -446,6 +455,7 @@ async fn live_monitor_snapshot(
             &telemetry_state,
             &screen,
             config,
+            activation_key.unwrap_or_else(|| "alt".to_string()),
             include_frame.unwrap_or(true),
         )
     })
@@ -463,14 +473,23 @@ fn build_live_monitor_snapshot(
     telemetry_state: &SystemTelemetryState,
     screen: &ScreenInfo,
     config: NativeInferenceConfig,
+    activation_key: String,
     include_frame: bool,
 ) -> Result<LiveMonitorSnapshot, String> {
     let sequence = LIVE_SNAPSHOT_SEQUENCE
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
-    if !live_activation_pressed() {
-        return build_live_idle_snapshot(app, overlay_state, telemetry_state, screen, sequence);
+    if !live_activation_pressed(&activation_key) {
+        return build_live_idle_snapshot(
+            app,
+            overlay_state,
+            telemetry_state,
+            screen,
+            sequence,
+            &activation_key,
+        );
     }
+    LIVE_ACTIVATION_WAS_PRESSED.store(true, Ordering::Release);
 
     let total_started = Instant::now();
     let capture_started = Instant::now();
@@ -615,6 +634,7 @@ fn build_live_idle_snapshot(
     telemetry_state: &SystemTelemetryState,
     screen: &ScreenInfo,
     sequence: u64,
+    activation_key: &str,
 ) -> Result<LiveMonitorSnapshot, String> {
     let cursor = cursor_position().unwrap_or([
         screen.origin[0] as f32 + screen.size[0] as f32 / 2.0,
@@ -622,26 +642,29 @@ fn build_live_idle_snapshot(
     ]);
     let cursor_on_screen = point_in_screen(cursor, screen.origin, screen.size);
     let people = Vec::new();
-    emit_overlay_snapshot(
-        app,
-        overlay_state,
-        OverlaySnapshot {
-            screen_id: screen.id.clone(),
-            screen_origin: screen.origin,
-            screen_size: screen.size,
-            cursor,
-            cursor_on_screen,
-            people: people.clone(),
-        },
-    );
+    if LIVE_ACTIVATION_WAS_PRESSED.swap(false, Ordering::AcqRel) {
+        emit_overlay_snapshot(
+            app,
+            overlay_state,
+            OverlaySnapshot {
+                screen_id: screen.id.clone(),
+                screen_origin: screen.origin,
+                screen_size: screen.size,
+                cursor,
+                cursor_on_screen,
+                people: people.clone(),
+            },
+        );
+    }
     let telemetry = sample_system_telemetry(telemetry_state);
     if sequence <= 5 || sequence % LIVE_SNAPSHOT_LOG_EVERY == 0 {
         append_app_log(
             "backend",
             "live snapshot idle",
             Some(&format!(
-                r#"{{"sequence":{sequence},"screen_id":"{}","reason":"hold_alt"}}"#,
-                screen.id
+                r#"{{"sequence":{sequence},"screen_id":"{}","reason":"hold_activation_key","activation_key":"{}"}}"#,
+                screen.id,
+                json_escape(activation_key)
             )),
         );
     }
@@ -655,21 +678,45 @@ fn build_live_idle_snapshot(
         activation_pressed: false,
         latency: LiveLatency::default(),
         telemetry,
-        model_status: "Hold Alt to scan".to_string(),
-        capture_status: "idle: hold Alt to capture and infer".to_string(),
+        model_status: format!("Hold {} to scan", activation_key_label(activation_key)),
+        capture_status: format!(
+            "idle: hold {} to capture and infer",
+            activation_key_label(activation_key)
+        ),
         provider: "idle".to_string(),
         review_only: true,
     })
 }
 
 #[cfg(target_os = "windows")]
-fn live_activation_pressed() -> bool {
-    unsafe { GetAsyncKeyState(VK_MENU) < 0 }
+fn live_activation_pressed(activation_key: &str) -> bool {
+    unsafe { GetAsyncKeyState(activation_key_code(activation_key)) < 0 }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn live_activation_pressed() -> bool {
+fn live_activation_pressed(_activation_key: &str) -> bool {
     true
+}
+
+#[cfg(target_os = "windows")]
+fn activation_key_code(value: &str) -> i32 {
+    match value.to_ascii_lowercase().as_str() {
+        "shift" => VK_SHIFT,
+        "control" | "ctrl" => VK_CONTROL,
+        "space" => VK_SPACE,
+        "right_mouse" | "mouse_right" | "right-button" => VK_RBUTTON,
+        _ => VK_MENU,
+    }
+}
+
+fn activation_key_label(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "shift" => "Shift",
+        "control" | "ctrl" => "Ctrl",
+        "space" => "Space",
+        "right_mouse" | "mouse_right" | "right-button" => "Right Mouse",
+        _ => "Alt",
+    }
 }
 
 fn should_log_live_snapshot(sequence: u64, total_ms: u128) -> bool {
@@ -1011,7 +1058,7 @@ fn json_escape(value: &str) -> String {
 }
 
 fn sample_system_telemetry(state: &SystemTelemetryState) -> SystemTelemetry {
-    let mut cache = match state.cache.lock() {
+    match state.cache.lock() {
         Ok(cache) => cache,
         Err(_) => {
             return SystemTelemetry {
@@ -1019,16 +1066,40 @@ fn sample_system_telemetry(state: &SystemTelemetryState) -> SystemTelemetry {
                 ..SystemTelemetry::default()
             };
         }
-    };
+    }
+    .telemetry
+    .clone()
+}
 
-    let cpu_usage_percent = sample_cpu_usage_percent(&mut cache.cpu_sample);
-    let gpu_sample = sample_gpu_telemetry(&mut cache.gpu_sample);
-    SystemTelemetry {
-        cpu_usage_percent,
-        gpu_usage_percent: gpu_sample.usage_percent,
-        gpu_memory_used_mb: gpu_sample.memory_used_mb,
-        gpu_memory_total_mb: gpu_sample.memory_total_mb,
-        gpu_status: gpu_sample.status,
+fn start_system_telemetry_loop(cache: Arc<Mutex<SystemTelemetryCache>>) {
+    thread::Builder::new()
+        .name("autoaim-telemetry".to_string())
+        .spawn(move || loop {
+            refresh_system_telemetry(&cache);
+            thread::sleep(Duration::from_secs(2));
+        })
+        .ok();
+}
+
+fn refresh_system_telemetry(cache: &Arc<Mutex<SystemTelemetryCache>>) {
+    let cpu_usage_percent = cache
+        .lock()
+        .ok()
+        .and_then(|mut cache| sample_cpu_usage_percent(&mut cache.cpu_sample));
+    let gpu_sample = query_gpu_telemetry().unwrap_or_else(|status| GpuTelemetrySample {
+        usage_percent: None,
+        memory_used_mb: None,
+        memory_total_mb: None,
+        status,
+    });
+    if let Ok(mut cache) = cache.lock() {
+        cache.telemetry = SystemTelemetry {
+            cpu_usage_percent,
+            gpu_usage_percent: gpu_sample.usage_percent,
+            gpu_memory_used_mb: gpu_sample.memory_used_mb,
+            gpu_memory_total_mb: gpu_sample.memory_total_mb,
+            gpu_status: gpu_sample.status,
+        };
     }
 }
 
@@ -1101,24 +1172,6 @@ fn sample_cpu_times() -> Option<CpuTimesSample> {
     None
 }
 
-fn sample_gpu_telemetry(previous: &mut Option<GpuTelemetrySample>) -> GpuTelemetrySample {
-    if let Some(sample) = previous.as_ref() {
-        if sample.sampled_at.elapsed() < Duration::from_secs(2) {
-            return sample.clone();
-        }
-    }
-
-    let sample = query_gpu_telemetry().unwrap_or_else(|status| GpuTelemetrySample {
-        sampled_at: Instant::now(),
-        usage_percent: None,
-        memory_used_mb: None,
-        memory_total_mb: None,
-        status,
-    });
-    *previous = Some(sample.clone());
-    sample
-}
-
 #[cfg(target_os = "windows")]
 fn query_gpu_telemetry() -> Result<GpuTelemetrySample, String> {
     let output = Command::new("nvidia-smi")
@@ -1145,7 +1198,6 @@ fn query_gpu_telemetry() -> Result<GpuTelemetrySample, String> {
         return Err(format!("unexpected nvidia-smi output: {line}"));
     }
     Ok(GpuTelemetrySample {
-        sampled_at: Instant::now(),
         usage_percent: parts[0].parse::<f32>().ok(),
         memory_used_mb: parts[1].parse::<u64>().ok(),
         memory_total_mb: parts[2].parse::<u64>().ok(),
@@ -1942,7 +1994,9 @@ fn main() {
         .manage(LiveDatasetState::default())
         .manage(SystemTelemetryState::default())
         .manage(OverlayState::default())
-        .setup(|_app| {
+        .setup(|app| {
+            let telemetry_cache = app.state::<SystemTelemetryState>().cache.clone();
+            start_system_telemetry_loop(telemetry_cache);
             let log_path = log_file_path();
             append_app_log(
                 "backend",
