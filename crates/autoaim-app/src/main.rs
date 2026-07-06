@@ -75,9 +75,19 @@ const AUTO_MOUSE_DISTANCE_WEIGHT: f32 = 0.40;
 #[cfg(target_os = "windows")]
 const AUTO_MOUSE_MIN_MOVE_PX: f32 = 2.0;
 #[cfg(target_os = "windows")]
-const AUTO_MOUSE_RELATIVE_GAIN: f32 = 0.10;
+const AUTO_MOUSE_RELATIVE_GAIN: f32 = 0.12;
 #[cfg(target_os = "windows")]
-const AUTO_MOUSE_MAX_RELATIVE_STEP: f32 = 24.0;
+const AUTO_MOUSE_MAX_RELATIVE_STEP: f32 = 28.0;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_NEAR_DISTANCE_PX: f32 = 90.0;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_REFERENCE_TARGET_WIDTH_PX: f32 = 130.0;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_MIN_RANGE_GAIN: f32 = 0.70;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_MAX_RANGE_GAIN: f32 = 1.45;
+#[cfg(target_os = "windows")]
+const AUTO_MOUSE_MIN_ROUND_PX: f32 = 0.35;
 static LIVE_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static LIVE_ACTIVATION_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
@@ -1180,6 +1190,14 @@ fn clamp_point_to_screen(point: Point, origin: [i32; 2], size: [u32; 2]) -> Poin
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug)]
+struct AutoMouseTarget {
+    point: Point,
+    bbox: [f32; 4],
+    score: f32,
+}
+
+#[cfg(target_os = "windows")]
 fn maybe_move_mouse_to_target(
     people: &[LivePersonPosition],
     cursor: Point,
@@ -1198,17 +1216,17 @@ fn maybe_move_mouse_to_target(
             "screen_center",
         )
     };
-    let Some(target_point) = best_auto_mouse_target(people, aim_anchor, prediction_enabled) else {
+    let Some(target) = best_auto_mouse_target(people, aim_anchor, prediction_enabled) else {
         return;
     };
-    let target_point = clamp_point_to_screen(target_point, screen_origin, screen_size);
+    let target_point = clamp_point_to_screen(target.point, screen_origin, screen_size);
     let aim_dx = target_point[0] - aim_anchor[0];
     let aim_dy = target_point[1] - aim_anchor[1];
     if (aim_dx * aim_dx + aim_dy * aim_dy).sqrt() < AUTO_MOUSE_MIN_MOVE_PX {
         return;
     }
 
-    let [input_dx, input_dy] = relative_mouse_delta([aim_dx, aim_dy]);
+    let [input_dx, input_dy] = relative_mouse_delta([aim_dx, aim_dy], target.bbox);
     if input_dx == 0 && input_dy == 0 {
         return;
     }
@@ -1223,7 +1241,7 @@ fn maybe_move_mouse_to_target(
                 "auto mouse move failed"
             },
             Some(&format!(
-                r#"{{"sequence":{sequence},"screen_id":"{}","mode":"relative_sendinput","anchor_source":"{}","anchor":[{:.1},{:.1}],"cursor":[{:.1},{:.1}],"target":[{:.1},{:.1}],"aim_dx":{:.1},"aim_dy":{:.1},"input_dx":{},"input_dy":{},"people":{}}}"#,
+                r#"{{"sequence":{sequence},"screen_id":"{}","mode":"relative_sendinput","anchor_source":"{}","anchor":[{:.1},{:.1}],"cursor":[{:.1},{:.1}],"target":[{:.1},{:.1}],"target_bbox":[{:.1},{:.1},{:.1},{:.1}],"target_score":{:.3},"aim_dx":{:.1},"aim_dy":{:.1},"input_dx":{},"input_dy":{},"people":{}}}"#,
                 json_escape(screen_id),
                 anchor_source,
                 aim_anchor[0],
@@ -1232,6 +1250,11 @@ fn maybe_move_mouse_to_target(
                 cursor[1],
                 target_point[0],
                 target_point[1],
+                target.bbox[0],
+                target.bbox[1],
+                target.bbox[2],
+                target.bbox[3],
+                target.score,
                 aim_dx,
                 aim_dy,
                 input_dx,
@@ -1251,13 +1274,45 @@ fn screen_center_point(origin: [i32; 2], size: [u32; 2]) -> Point {
 }
 
 #[cfg(target_os = "windows")]
-fn relative_mouse_delta(aim_delta: Point) -> [i32; 2] {
-    let scaled = [
-        aim_delta[0] * AUTO_MOUSE_RELATIVE_GAIN,
-        aim_delta[1] * AUTO_MOUSE_RELATIVE_GAIN,
-    ];
-    let clamped = clamp_vector_length(scaled, AUTO_MOUSE_MAX_RELATIVE_STEP);
-    [clamped[0].round() as i32, clamped[1].round() as i32]
+fn relative_mouse_delta(aim_delta: Point, target_bbox: [f32; 4]) -> [i32; 2] {
+    let distance = (aim_delta[0] * aim_delta[0] + aim_delta[1] * aim_delta[1]).sqrt();
+    if distance < AUTO_MOUSE_MIN_MOVE_PX {
+        return [0, 0];
+    }
+
+    let distance_gain = (distance / AUTO_MOUSE_NEAR_DISTANCE_PX)
+        .sqrt()
+        .clamp(0.40, 1.0);
+    let range_gain = auto_mouse_range_gain(target_bbox);
+    let gain = AUTO_MOUSE_RELATIVE_GAIN * distance_gain * range_gain;
+    let scaled = [aim_delta[0] * gain, aim_delta[1] * gain];
+    let max_step = (distance * 0.16).clamp(3.0, AUTO_MOUSE_MAX_RELATIVE_STEP);
+    let clamped = clamp_vector_length(scaled, max_step);
+    [
+        round_relative_mouse_component(clamped[0]),
+        round_relative_mouse_component(clamped[1]),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn auto_mouse_range_gain(target_bbox: [f32; 4]) -> f32 {
+    let target_width = target_bbox[2].max(1.0);
+    (AUTO_MOUSE_REFERENCE_TARGET_WIDTH_PX / target_width)
+        .sqrt()
+        .clamp(AUTO_MOUSE_MIN_RANGE_GAIN, AUTO_MOUSE_MAX_RANGE_GAIN)
+}
+
+#[cfg(target_os = "windows")]
+fn round_relative_mouse_component(value: f32) -> i32 {
+    if value.abs() < AUTO_MOUSE_MIN_ROUND_PX {
+        return 0;
+    }
+    let rounded = value.round() as i32;
+    if rounded == 0 {
+        value.signum() as i32
+    } else {
+        rounded
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1306,7 +1361,7 @@ fn best_auto_mouse_target(
     people: &[LivePersonPosition],
     aim_anchor: Point,
     prediction_enabled: bool,
-) -> Option<Point> {
+) -> Option<AutoMouseTarget> {
     people
         .iter()
         .filter(|person| person.class_name == "person")
@@ -1323,14 +1378,17 @@ fn best_auto_mouse_target(
             let confidence_score = person.confidence.clamp(0.0, 1.0);
             let score = confidence_score * AUTO_MOUSE_CONFIDENCE_WEIGHT
                 + distance_score * AUTO_MOUSE_DISTANCE_WEIGHT;
-            (point, score)
+            AutoMouseTarget {
+                point,
+                bbox: person.bbox,
+                score,
+            }
         })
         .max_by(|left, right| {
-            left.1
-                .partial_cmp(&right.1)
+            left.score
+                .partial_cmp(&right.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|(point, _score)| point)
 }
 
 fn apply_live_tracking(

@@ -1,10 +1,11 @@
 # AutoAim Review
 
-AutoAim Review is a visualization-only screen capture, inference review, and
-dataset tooling project. It is designed for legal training/review environments:
-the software may display model suggestions, log datasets, and compute metrics,
-but it must not move the operating-system cursor, click, inject input, or
-control third-party games.
+AutoAim Review is a screen capture, inference review, and dataset tooling
+project. It is designed for legal training/review environments: the software may
+display model suggestions, log datasets, compute metrics, and, only when the
+explicit `Auto move mouse` toggle is enabled, send bounded relative cursor
+movement while the configured activation key is held. It must not click, install
+hooks, modify third-party processes, or write game memory.
 
 The project is now Rust-first for the Windows runtime. Python is kept for
 training, dataset conversion, validation, and offline evaluation.
@@ -20,9 +21,10 @@ Implemented now:
 - Rust target scoring that outputs `suggested_point` and `dx/dy`.
 - Rust validation, evaluation summary, person/head position, and inference
   event CLI.
-- Rust + Tauri GUI with a live monitor first screen, screen selection, live
-  screen preview, real-time cursor position, browser-side person detection,
-  offline JSONL tools, self-update controls, and English/Chinese switching.
+- Rust + Tauri GUI with a live monitor first screen, screen selection, native
+  live screen preview, real-time cursor position, Rust YOLOv8-pose/MoveNet
+  inference, offline JSONL tools, self-update controls, and English/Chinese
+  switching.
 - Windows Setup installer, package logo assets, and installer-created
   shortcuts.
 - Frame annotation data model.
@@ -112,10 +114,14 @@ The GUI can:
 - use the system picker to select which screen to share,
 - draw the live screen preview into the app,
 - show the current mouse position in screen coordinates,
-- send live frames through the Rust detector interface and draw person/head
-  positions returned by the backend,
+- send live frames through the Rust detector interface and draw YOLOv8-pose or
+  MoveNet person/head positions returned by the backend,
+- scan the full frame plus a crosshair-focused zoom region, with bbox/pose
+  filters to reject small UI artifacts, extreme shapes, and likely own-avatar
+  detections at the bottom of the screen,
 - optionally send relative mouse movement toward the selected person/head point
-  while the activation key is held,
+  while the activation key is held; the movement uses bounded relative steps
+  with distance and target-size adaptive gain,
 - select a frame JSONL file,
 - validate dataset records,
 - evaluate suggestions and show metrics,
@@ -135,12 +141,12 @@ Basic use:
 5. Watch the app display the live screen, cursor coordinates, and detected
    person/head positions.
 
-The live detector path now goes through Rust. The current release includes a
-deterministic native mock detector so the app and E2E tests can validate the
-full UI/backend contract without shipping large model weights. Native
-ONNX/TensorRT inference and a Rust overlay renderer are still planned runtime
-modules; plug the production model into the configured model path/provider
-interface.
+The live detector path now goes through Rust native capture and Rust inference
+adapters. When a YOLOv8/YOLOv8-pose ONNX model is configured, frames run through
+ONNX Runtime with the selected CPU, DirectML, CUDA, or TensorRT provider. The
+decoder uses confidence, bbox geometry, keypoint quality, and body-structure
+checks before a target is emitted. If no model is configured, the app falls back
+to deterministic visual candidates for wiring and UI validation.
 
 ## Person Position Output
 
@@ -160,9 +166,10 @@ point but does not move the system cursor or inject input:
 cargo run -p autoaim-cli -- positions examples/sample_frames.jsonl --assist-events
 ```
 
-The app also exposes a runtime config preview for NVIDIA CUDA or TensorRT model
-execution. Actual live ONNX/TensorRT inference still requires the planned
-capture/inference crates and a supplied person/head model file.
+The app also exposes runtime config preview for CPU, DirectML, NVIDIA CUDA, and
+TensorRT execution. Live ONNX inference requires a supplied model file, typically
+`models/yolov8n-pose.onnx` for pose output or `models/yolov8n.onnx` for person
+bbox output.
 
 ## Windows Install
 

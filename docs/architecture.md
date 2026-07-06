@@ -83,15 +83,22 @@ Pipeline:
 
 ```text
 D3D11 frame
+ -> full-frame and crosshair-focused ROI selection
  -> Rust resize/letterbox
  -> Rust normalize
  -> model inference
+ -> bbox geometry and pose-keypoint quality filtering
  -> person bbox / head bbox / head point
  -> Rust tracker smoothing
  -> Rust target scoring
  -> Rust overlay draw
  -> Rust metrics/logging
 ```
+
+The YOLOv8 live path keeps a full-frame scan for broad awareness and a smaller
+crosshair-focused zoom scan for distant targets. Candidate filtering rejects
+tiny boxes, extreme aspect ratios, low-quality keypoint structures, and large
+bottom-of-screen detections that are likely to be the player's own avatar.
 
 ## Output
 

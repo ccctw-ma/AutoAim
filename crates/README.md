@@ -11,7 +11,8 @@ Current crates:
 - `autoaim-cli`: Rust command line entry point for validation, evaluation, and
   suggestion event output.
 - `autoaim-capture`: native Windows screen and cursor capture through Win32 APIs.
-- `autoaim-infer`: MoveNet pose inference through the pure-Rust `tract-onnx`
-  backend, plus a visual fallback when no model file is configured.
+- `autoaim-infer`: MoveNet and YOLOv8/YOLOv8-pose inference through Rust
+  adapters, including ONNX Runtime providers and a visual fallback when no
+  model file is configured.
 - `autoaim-app`: Tauri desktop UI for live screen review and offline dataset
   workflows.

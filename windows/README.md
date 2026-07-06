@@ -13,8 +13,8 @@ crates/
   autoaim-runtime/     # implemented: frame -> inference event pipeline
   autoaim-cli/         # implemented: validate / evaluate / suggest commands
   autoaim-app/         # implemented: Rust + Tauri desktop UI
-  autoaim-capture/     # planned: Windows.Graphics.Capture through windows-rs
-  autoaim-infer/       # planned: ONNX Runtime wrapper, TensorRT feature gate
+  autoaim-capture/     # implemented: native Windows screen/cursor capture
+  autoaim-infer/       # implemented: MoveNet and YOLOv8/YOLOv8-pose inference
 
 windows/
   README.md            # Windows-specific implementation notes
@@ -25,9 +25,9 @@ windows/
 
 - Use the `windows` crate for Win32, WinRT, D3D11, Direct2D, and
   DirectComposition calls.
-- Use `Windows.Graphics.Capture` for explicit user-selected window or display
-  capture.
-- Keep frame pixels in a D3D11 texture ring buffer owned by Rust.
+- Use native Windows capture for explicit user-selected screen capture.
+- Keep capture sessions long-lived; do not rebuild the desktop capture path per
+  frame.
 - Use named pipes for MVP IPC with the JSON contracts in `contracts/ipc.md`.
 - Keep TensorRT behind an optional Cargo feature so the default build can run
   through ONNX Runtime DirectML or CPU.
@@ -49,13 +49,15 @@ is held.
 3. Rust target scoring and inference event generation.
 4. Rust CLI commands for validation, evaluation, and suggestion event output.
 5. Rust + Tauri GUI with a live monitor first screen, screen selection, live
-   screen preview, real-time cursor coordinates, browser-side person detection,
+   screen preview, real-time cursor coordinates, Rust person/pose inference,
    offline JSONL tools, update buttons, and English/Chinese language switching.
 
 The current GUI can show a live screen preview through the system screen picker
-and send frame metadata through the Rust detector interface. This release uses a
-deterministic Rust mock detector for E2E validation and wiring. Native
-ONNX/TensorRT inference and overlay rendering are still planned runtime crates.
+and send frames through the Rust detector interface. When a YOLOv8 or
+YOLOv8-pose ONNX model is configured, inference runs through ONNX Runtime with
+CPU, DirectML, CUDA, or TensorRT providers. The live path scans the full frame
+plus a crosshair-focused zoom region, rejects likely UI/self-avatar detections
+with bbox and keypoint-quality checks, and emits screened person/head targets.
 
 ## Release Zip GUI Entry
 
@@ -77,6 +79,8 @@ On first launch, click `Start now`, choose the screen in the system picker, and
 the app displays the live preview, mouse coordinates, and detected person
 positions. If `Auto move mouse` is enabled, the app sends relative mouse
 movement toward the selected person/head point while the activation key is held.
+The relative movement is bounded and adapts to target distance and bbox size so
+small/far targets can be approached without large near-target overshoot.
 
 ## Setup Installer
 

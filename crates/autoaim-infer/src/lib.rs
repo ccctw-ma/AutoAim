@@ -41,6 +41,15 @@ const YOLOV8_GRID_SCAN_INTERVAL: u64 = 4;
 const YOLOV8_GRID_COLUMNS: usize = 3;
 const YOLOV8_GRID_ROWS: usize = 2;
 const YOLOV8_GRID_REGION_COUNT: u64 = (YOLOV8_GRID_COLUMNS * YOLOV8_GRID_ROWS) as u64;
+const YOLOV8_MIN_BBOX_SIDE_PX: f32 = 8.0;
+const YOLOV8_MIN_BBOX_AREA_PX: f32 = 96.0;
+const YOLOV8_MIN_PERSON_ASPECT: f32 = 0.55;
+const YOLOV8_MAX_PERSON_ASPECT: f32 = 6.0;
+const YOLOV8_SELF_BBOX_MIN_HEIGHT_RATIO: f32 = 0.30;
+const YOLOV8_SELF_BBOX_MIN_WIDTH_RATIO: f32 = 0.12;
+const YOLOV8_SELF_BOTTOM_MARGIN_RATIO: f32 = 0.025;
+const YOLOV8_SELF_CENTER_MIN_RATIO: f32 = 0.30;
+const YOLOV8_SELF_CENTER_MAX_RATIO: f32 = 0.64;
 const MOVENET_MAX_SCAN_POSES: usize = 4;
 const MOVENET_DUPLICATE_IOU_THRESHOLD: f32 = 0.35;
 pub const MOVENET_KEYPOINT_NAMES: [&str; MOVENET_KEYPOINT_COUNT] = [
@@ -975,7 +984,7 @@ fn yolov8_primary_scan_regions(frame: &CapturedFrame) -> Vec<YoloV8ScanRegion> {
     let height = frame_height as f32;
     let mut regions = Vec::new();
     push_yolov8_region(&mut regions, width, height, 0.0, 0.0, width, height);
-    push_center_yolov8_region(&mut regions, width, height, 0.38, 0.54);
+    push_crosshair_yolov8_region(&mut regions, width, height, 0.24, 0.32, -0.06);
     regions
 }
 
@@ -994,17 +1003,18 @@ fn yolov8_grid_scan_region(frame: &CapturedFrame, scan_sequence: u64) -> YoloV8S
     )
 }
 
-fn push_center_yolov8_region(
+fn push_crosshair_yolov8_region(
     regions: &mut Vec<YoloV8ScanRegion>,
     frame_width: f32,
     frame_height: f32,
     width_ratio: f32,
     height_ratio: f32,
+    vertical_offset_ratio: f32,
 ) {
     let width = frame_width * width_ratio;
     let height = frame_height * height_ratio;
     let origin_x = (frame_width - width) / 2.0;
-    let origin_y = (frame_height - height) / 2.0;
+    let origin_y = (frame_height - height) / 2.0 + frame_height * vertical_offset_ratio;
     push_yolov8_region(
         regions,
         frame_width,
@@ -1141,6 +1151,9 @@ pub fn decode_yolov8_people_output(
         let x2 = top_left[0].max(bottom_right[0]);
         let y2 = top_left[1].max(bottom_right[1]);
         let bbox = [x1, y1, (x2 - x1).max(1.0), (y2 - y1).max(1.0)];
+        if !yolov8_candidate_bbox_valid(bbox, transform) {
+            continue;
+        }
         let object = DetectionObject {
             class_name: "person".to_string(),
             bbox,
@@ -1212,6 +1225,44 @@ fn select_yolov8_candidates(mut candidates: Vec<YoloV8Candidate>) -> YoloV8Decod
         }
     }
     YoloV8DecodedOutput { objects, poses }
+}
+
+fn yolov8_candidate_bbox_valid(bbox: [f32; 4], transform: &FrameToModelTransform) -> bool {
+    if bbox[2] < YOLOV8_MIN_BBOX_SIDE_PX || bbox[3] < YOLOV8_MIN_BBOX_SIDE_PX {
+        return false;
+    }
+    if bbox[2] * bbox[3] < YOLOV8_MIN_BBOX_AREA_PX {
+        return false;
+    }
+
+    let aspect = bbox[3] / bbox[2].max(1.0);
+    if !(YOLOV8_MIN_PERSON_ASPECT..=YOLOV8_MAX_PERSON_ASPECT).contains(&aspect) {
+        return false;
+    }
+
+    !yolov8_likely_own_avatar_bbox(bbox, transform)
+}
+
+fn yolov8_likely_own_avatar_bbox(bbox: [f32; 4], transform: &FrameToModelTransform) -> bool {
+    let screen_width = transform.screen_size[0] as f32;
+    let screen_height = transform.screen_size[1] as f32;
+    if screen_width <= 1.0 || screen_height <= 1.0 {
+        return false;
+    }
+
+    let screen_left = transform.screen_origin[0] as f32;
+    let screen_top = transform.screen_origin[1] as f32;
+    let center_x_ratio = (bbox[0] + bbox[2] * 0.5 - screen_left) / screen_width;
+    let top_ratio = (bbox[1] - screen_top) / screen_height;
+    let bottom_ratio = (bbox[1] + bbox[3] - screen_top) / screen_height;
+    let width_ratio = bbox[2] / screen_width;
+    let height_ratio = bbox[3] / screen_height;
+
+    (YOLOV8_SELF_CENTER_MIN_RATIO..=YOLOV8_SELF_CENTER_MAX_RATIO).contains(&center_x_ratio)
+        && bottom_ratio >= 1.0 - YOLOV8_SELF_BOTTOM_MARGIN_RATIO
+        && top_ratio >= 0.42
+        && (height_ratio >= YOLOV8_SELF_BBOX_MIN_HEIGHT_RATIO
+            || width_ratio >= YOLOV8_SELF_BBOX_MIN_WIDTH_RATIO)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1394,12 +1445,20 @@ fn yolov8_pose_is_valid(pose: &PoseEstimate) -> bool {
     let mut face_count = 0usize;
     let mut shoulder_count = 0usize;
     let mut hip_count = 0usize;
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
     for keypoint in &pose.keypoints {
         if keypoint.score >= YOLOV8_POSE_KEYPOINT_SCORE_THRESHOLD
             && point_in_expanded_bbox(keypoint.point, pose.bbox, 0.20)
         {
             visible_count += 1;
             visible_score_sum += keypoint.score;
+            min_x = min_x.min(keypoint.point[0]);
+            min_y = min_y.min(keypoint.point[1]);
+            max_x = max_x.max(keypoint.point[0]);
+            max_y = max_y.max(keypoint.point[1]);
             count_yolov8_structure_keypoint(
                 keypoint.index,
                 &mut face_count,
@@ -1411,8 +1470,36 @@ fn yolov8_pose_is_valid(pose: &PoseEstimate) -> bool {
     if visible_count < YOLOV8_POSE_MIN_VISIBLE_KEYPOINTS {
         return false;
     }
+    if !yolov8_visible_keypoint_span_valid(pose.bbox, min_x, min_y, max_x, max_y) {
+        return false;
+    }
+    if !yolov8_head_point_position_valid(pose.head_point, pose.bbox) {
+        return false;
+    }
     visible_score_sum / visible_count as f32 >= YOLOV8_POSE_MIN_VISIBLE_AVG_SCORE
         && yolov8_pose_structure_valid(face_count, shoulder_count, hip_count)
+}
+
+fn yolov8_visible_keypoint_span_valid(
+    bbox: [f32; 4],
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+) -> bool {
+    if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+        return false;
+    }
+
+    let span_x = (max_x - min_x).max(0.0);
+    let span_y = (max_y - min_y).max(0.0);
+    let min_span_x = (bbox[2] * 0.06).clamp(4.0, 18.0);
+    let min_span_y = (bbox[3] * 0.08).clamp(4.0, 24.0);
+    span_x >= min_span_x && span_y >= min_span_y
+}
+
+fn yolov8_head_point_position_valid(head_point: Point, bbox: [f32; 4]) -> bool {
+    point_in_expanded_bbox(head_point, bbox, 0.10) && head_point[1] <= bbox[1] + bbox[3] * 0.72
 }
 
 fn count_yolov8_structure_keypoint(
@@ -2214,6 +2301,31 @@ mod tests {
     }
 
     #[test]
+    fn yolov8_detect_output_rejects_likely_own_avatar_at_screen_bottom() {
+        let anchor_count = 1;
+        let mut values = vec![0.0; YOLOV8_DETECT_OUTPUT_CHANNELS * anchor_count];
+        values[0] = 50.0;
+        values[anchor_count] = 85.0;
+        values[anchor_count * 2] = 20.0;
+        values[anchor_count * 3] = 30.0;
+        values[(4 + YOLOV8_PERSON_CLASS_ID) * anchor_count] = 0.90;
+
+        let decoded = decode_yolov8_people_output(
+            &YoloV8RawOutput {
+                shape: vec![1, YOLOV8_DETECT_OUTPUT_CHANNELS, anchor_count],
+                values,
+            },
+            &identity_yolo_transform(100),
+            100,
+            0.25,
+        )
+        .unwrap();
+
+        assert!(decoded.objects.is_empty());
+        assert!(decoded.poses.is_empty());
+    }
+
+    #[test]
     fn yolov8_pose_output_decodes_keypoints_from_shape() {
         let anchor_count = 1;
         let mut values = vec![0.0; YOLOV8_POSE_OUTPUT_CHANNELS * anchor_count];
@@ -2314,17 +2426,17 @@ mod tests {
     }
 
     #[test]
-    fn yolov8_primary_scan_regions_include_full_frame_and_center_zoom() {
+    fn yolov8_primary_scan_regions_include_full_frame_and_crosshair_zoom() {
         let frame = frame_with_blob(640, 360);
         let regions = yolov8_primary_scan_regions(&frame);
 
         assert_eq!(regions.len(), YOLOV8_PRIMARY_SCAN_REGIONS);
         assert_eq!(regions[0].origin, [0.0, 0.0]);
         assert_eq!(regions[0].size, [640.0, 360.0]);
-        assert!(regions
-            .iter()
-            .skip(1)
-            .any(|region| region.size[0] < 640.0 && region.size[1] < 360.0));
+        assert_near(regions[1].origin[0], 243.2);
+        assert_near(regions[1].origin[1], 100.8);
+        assert_near(regions[1].size[0], 153.6);
+        assert_near(regions[1].size[1], 115.2);
     }
 
     #[test]
